@@ -107,4 +107,28 @@ venv.bak/
 
 .idea/
 
-processed/
+# Virtual environment
+.venv/
+
+# --- Datasets (download: download_smd.py / download_smap_msl.py) ---
+ServerMachineDataset/**
+!ServerMachineDataset/.gitkeep
+
+data/**
+!data/.gitkeep
+
+processed/**
+!processed/.gitkeep
+
+# Raw data file patterns
+ServerMachineDataset/**/*.txt
+data/**/*.npy
+data/labeled_anomalies.csv
+
+# --- Experiment outputs ---
+model/
+result/
+log/**
+!log/.gitkeep
+*.pkl
+*.pt
