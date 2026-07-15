@@ -1,15 +1,25 @@
 # -*- coding: utf-8 -*-
+"""Network building blocks — PyTorch port of omni_anomaly.wrapper."""
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _xavier_linear(in_features, out_features):
+    layer = nn.Linear(in_features, out_features)
+    nn.init.xavier_uniform_(layer.weight)
+    nn.init.zeros_(layer.bias)
+    return layer
+
+
 class SoftplusStd(nn.Module):
-    """Dense layer followed by softplus + epsilon for positive std."""
+    """``softplus(dense(inputs)) + epsilon`` (matches ``softplus_std``)."""
 
     def __init__(self, in_features, out_features, epsilon=1e-4):
         super().__init__()
-        self.linear = nn.Linear(in_features, out_features)
+        self.linear = _xavier_linear(in_features, out_features)
         self.epsilon = epsilon
 
     def forward(self, x):
@@ -18,9 +28,11 @@ class SoftplusStd(nn.Module):
 
 class StackedRNNEncoder(nn.Module):
     """
-    GRU/LSTM encoder with post-RNN dense layers.
-    Input: (batch, window_length, input_dim)
-    Output: (batch, window_length, dense_dim)
+    Port of ``wrapper.rnn``:
+
+    * if input is 4-D → mean over first axis (n_z)
+    * RNN over time
+    * ``hidden_dense`` successive dense layers without activation
     """
 
     def __init__(
@@ -32,12 +44,12 @@ class StackedRNNEncoder(nn.Module):
         dense_dim=500,
     ):
         super().__init__()
-        self.window_length = None
-        if rnn_cell == 'LSTM':
+        cell = (rnn_cell or 'GRU').upper()
+        if cell == 'LSTM':
             self.rnn = nn.LSTM(input_dim, rnn_num_hidden, batch_first=True)
-        elif rnn_cell == 'GRU':
+        elif cell == 'GRU':
             self.rnn = nn.GRU(input_dim, rnn_num_hidden, batch_first=True)
-        elif rnn_cell == 'Basic':
+        elif cell == 'BASIC':
             self.rnn = nn.RNN(input_dim, rnn_num_hidden, batch_first=True)
         else:
             raise ValueError('rnn_cell must be LSTM, GRU, or Basic')
@@ -45,13 +57,16 @@ class StackedRNNEncoder(nn.Module):
         layers = []
         in_dim = rnn_num_hidden
         for _ in range(hidden_dense):
-            layers.append(nn.Linear(in_dim, dense_dim))
+            layers.append(_xavier_linear(in_dim, dense_dim))
             in_dim = dense_dim
         self.dense_layers = nn.ModuleList(layers)
 
     def forward(self, x):
         if x.dim() == 4:
+            # wrapper.rnn: reduce_mean over n_z axis
             x = x.mean(dim=0)
+        elif x.dim() != 3:
+            logging.error('rnn input shape error')
         outputs, _ = self.rnn(x)
         for layer in self.dense_layers:
             outputs = layer(outputs)
@@ -59,7 +74,7 @@ class StackedRNNEncoder(nn.Module):
 
 
 class GaussianParamNet(nn.Module):
-    """RNN hidden states -> Gaussian mean and std."""
+    """``wrap_params_net``: RNN → mean / std."""
 
     def __init__(self, input_dim, output_dim, rnn_num_hidden, dense_dim,
                  rnn_cell='GRU', hidden_dense=2, std_epsilon=1e-4):
@@ -67,19 +82,16 @@ class GaussianParamNet(nn.Module):
         self.encoder = StackedRNNEncoder(
             input_dim, rnn_num_hidden, rnn_cell, hidden_dense, dense_dim,
         )
-        self.mean_layer = nn.Linear(dense_dim, output_dim)
+        self.mean_layer = _xavier_linear(dense_dim, output_dim)
         self.std_layer = SoftplusStd(dense_dim, output_dim, epsilon=std_epsilon)
 
     def forward(self, x):
         h = self.encoder(x)
-        return {
-            'mean': self.mean_layer(h),
-            'std': self.std_layer(h),
-        }
+        return {'mean': self.mean_layer(h), 'std': self.std_layer(h)}
 
 
 class RecurrentGaussianParamNet(nn.Module):
-    """RNN hidden states -> input_q for RecurrentDistribution."""
+    """``wrap_params_net_srnn`` / connected q: RNN → ``input_q``."""
 
     def __init__(self, input_dim, rnn_num_hidden, dense_dim,
                  rnn_cell='GRU', hidden_dense=2):

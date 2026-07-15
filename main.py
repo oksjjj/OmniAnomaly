@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+"""
+OmniAnomaly entry point — PyTorch port of the official TensorFlow main.py
+https://github.com/NetManAIOps/OmniAnomaly
+"""
 import argparse
 import json
 import logging
@@ -16,37 +20,42 @@ from omni_anomaly.device import get_device
 from omni_anomaly.eval_methods import pot_eval, bf_search
 from omni_anomaly.model import OmniAnomaly
 from omni_anomaly.prediction import Predictor
-from omni_anomaly.training import Trainer
 from omni_anomaly.train_logger import experiment_logging
+from omni_anomaly.training import Trainer
 from omni_anomaly.utils import get_data_dim, get_data, save_z
 
 
 class ExpConfig:
-    """Experiment configuration (matches original OmniAnomaly defaults)."""
+    """Experiment configuration (defaults match the official ExpConfig)."""
 
+    # dataset configuration
     dataset = "machine-1-1"
     x_dim = 38
 
+    # model architecture configuration
     use_connected_z_q = True
     use_connected_z_p = True
 
+    # model parameters
     z_dim = 3
-    rnn_cell = 'GRU'
+    rnn_cell = 'GRU'  # 'GRU', 'LSTM' or 'Basic'
     rnn_num_hidden = 500
     window_length = 100
     dense_dim = 500
-    posterior_flow_type = 'nf'
+    posterior_flow_type = 'nf'  # 'nf' or None
     nf_layers = 20
     max_epoch = 10
     train_start = 0
     max_train_size = None
     batch_size = 50
-    l2_reg = 0.0001
+    l2_reg = 0.0001  # kept for API parity; unused in the official graph
     initial_lr = 0.001
     lr_anneal_factor = 0.5
     lr_anneal_epoch_freq = 40
+    lr_anneal_step_freq = None
     std_epsilon = 1e-4
 
+    # evaluation parameters
     test_n_z = 1
     test_batch_size = 50
     test_start = 0
@@ -58,26 +67,37 @@ class ExpConfig:
 
     valid_step_freq = 100
     gradient_clip_norm = 10.
-    early_stop = True
-    early_stop_min_epochs = 3
-    early_stop_patience = 30
-    early_stop_warmup_steps = 300
+
+    early_stop = True  # restore best valid weights at end (TrainLoop style)
+
+    # pot parameters
+    # recommend values for `level`:
+    # SMAP: 0.07
+    # MSL: 0.01
+    # SMD group 1: 0.0050
+    # SMD group 2: 0.0075
+    # SMD group 3: 0.0001
     level = 0.01
 
+    # outputs config
     save_z = False
     get_score_on_dim = False
     save_dir = 'model'
     restore_dir = None
     result_dir = 'result'
-    log_dir = 'log'
     train_score_filename = 'train_score.pkl'
     test_score_filename = 'test_score.pkl'
 
-    device = None  # auto-detect: mps > cuda > cpu
+    # PyTorch-only
+    log_dir = 'log'
+    device = None  # auto: mps > cuda > cpu
 
     def to_dict(self):
-        return {k: v for k, v in self.__class__.__dict__.items()
-                if not k.startswith('_') and not callable(v)}
+        return {
+            k: getattr(self, k)
+            for k in dir(self)
+            if not k.startswith('_') and not callable(getattr(self, k))
+        }
 
     def update_from_args(self, args):
         for key, value in vars(args).items():
@@ -86,7 +106,9 @@ class ExpConfig:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='OmniAnomaly (PyTorch / MPS)')
+    parser = argparse.ArgumentParser(
+        description='OmniAnomaly (PyTorch port of NetManAIOps/OmniAnomaly)',
+    )
     parser.add_argument('--dataset', type=str, default=None)
     parser.add_argument('--max_epoch', type=int, default=None)
     parser.add_argument('--batch_size', type=int, default=None)
@@ -97,14 +119,14 @@ def parse_args():
     parser.add_argument('--save_dir', type=str, default=None)
     parser.add_argument('--restore_dir', type=str, default=None)
     parser.add_argument('--result_dir', type=str, default=None)
-    parser.add_argument('--log_dir', type=str, default=None,
-                        help='Directory for training logs (default: log)')
+    parser.add_argument('--log_dir', type=str, default=None)
     parser.add_argument('--device', type=str, default=None,
-                        help='Device: mps, cuda, or cpu (default: auto)')
+                        help='mps / cuda / cpu (default: auto)')
     parser.add_argument('--valid_step_freq', type=int, default=None)
-    parser.add_argument('--early_stop_patience', type=int, default=None)
-    parser.add_argument('--early_stop_min_epochs', type=int, default=None)
-    parser.add_argument('--no_early_stop', action='store_true')
+    parser.add_argument('--no_early_stop', action='store_true',
+                        help='Do not restore best validation weights at end')
+    parser.add_argument('--posterior_flow_type', type=str, default=None,
+                        help="'nf' or 'none'")
     return parser.parse_args()
 
 
@@ -113,21 +135,17 @@ def get_checkpoint_dir(config):
     return os.path.join(base, config.dataset)
 
 
-def config_to_dict(config):
-    return {k: getattr(config, k) for k in config.to_dict()}
-
-
 def run_experiment(config, device, log):
     os.makedirs(config.result_dir, exist_ok=True)
+    if config.save_dir is not None:
+        os.makedirs(get_checkpoint_dir(config), exist_ok=True)
 
     print('=' * 30 + ' Configurations ' + '=' * 30)
-    print(json.dumps(config_to_dict(config), indent=2, default=str))
+    print(json.dumps(config.to_dict(), indent=2, default=str))
     print(f'Using device: {device}')
 
     with open(os.path.join(config.result_dir, 'config.json'), 'w') as f:
-        json.dump({k: getattr(config, k) for k in dir(config)
-                   if not k.startswith('_') and not callable(getattr(config, k))},
-                  f, indent=2, default=str)
+        json.dump(config.to_dict(), f, indent=2, default=str)
 
     (x_train, _), (x_test, y_test) = get_data(
         config.dataset,
@@ -152,15 +170,11 @@ def run_experiment(config, device, log):
         lr_anneal_factor=config.lr_anneal_factor,
         grad_clip_norm=config.gradient_clip_norm,
         valid_step_freq=config.valid_step_freq,
-        l2_reg=config.l2_reg,
         early_stop=config.early_stop,
-        patience=config.early_stop_patience,
-        early_stop_min_epochs=config.early_stop_min_epochs,
-        early_stop_warmup_steps=config.early_stop_warmup_steps,
         log_dir=log_dir,
         dataset=config.dataset,
         checkpoint_dir=checkpoint_dir if config.save_dir is not None else None,
-        config=config_to_dict(config),
+        config=config.to_dict(),
     )
 
     predictor = Predictor(
@@ -175,33 +189,27 @@ def run_experiment(config, device, log):
         print(f'Model restored from {path}')
         log.info('Restored checkpoint: %s', path)
 
-    best_valid_metrics = {}
-
     if config.max_epoch > 0:
-        print('=' * 30 + ' Training ' + '=' * 30)
-        train_start_time = time.time()
+        train_start = time.time()
         best_valid_metrics = trainer.fit(x_train)
-        train_time = (time.time() - train_start_time) / config.max_epoch
+        train_time = (time.time() - train_start) / config.max_epoch
         best_valid_metrics['train_time'] = train_time
+    else:
+        best_valid_metrics = {}
 
-    print('=' * 30 + ' Scoring ' + '=' * 30)
-    print('Computing train scores ...')
+    # train scores for POT
     train_score, train_z, train_pred_speed = predictor.get_score(x_train)
-    print(f'Train scoring done (avg batch time: {train_pred_speed:.4f}s)')
     if config.train_score_filename is not None:
-        score_path = os.path.join(config.result_dir, config.train_score_filename)
-        with open(score_path, 'wb') as f:
-            pickle.dump(train_score, f)
-        print(f'Train scores saved to {score_path}')
+        with open(os.path.join(config.result_dir, config.train_score_filename),
+                  'wb') as file:
+            pickle.dump(train_score, file)
     if config.save_z:
         save_z(train_z, 'train_z')
 
     if x_test is not None:
-        print('Computing test scores ...')
-        test_start_time = time.time()
+        test_start = time.time()
         test_score, test_z, pred_speed = predictor.get_score(x_test)
-        test_time = time.time() - test_start_time
-        print(f'Test scoring done (total: {test_time:.2f}s, avg batch: {pred_speed:.4f}s)')
+        test_time = time.time() - test_start
         if config.save_z:
             save_z(test_z, 'test_z')
         best_valid_metrics.update({
@@ -209,18 +217,15 @@ def run_experiment(config, device, log):
             'pred_total_time': test_time,
         })
         if config.test_score_filename is not None:
-            score_path = os.path.join(config.result_dir, config.test_score_filename)
-            with open(score_path, 'wb') as f:
-                pickle.dump(test_score, f)
-            print(f'Test scores saved to {score_path}')
+            with open(os.path.join(config.result_dir, config.test_score_filename),
+                      'wb') as file:
+                pickle.dump(test_score, file)
 
         if y_test is not None and len(y_test) >= len(test_score):
-            print('=' * 30 + ' Evaluation ' + '=' * 30)
             if config.get_score_on_dim:
                 test_score = np.sum(test_score, axis=-1)
                 train_score = np.sum(train_score, axis=-1)
 
-            print('Running best-F1 search ...')
             t, th = bf_search(
                 test_score, y_test[-len(test_score):],
                 start=config.bf_search_min,
@@ -229,7 +234,6 @@ def run_experiment(config, device, log):
                              config.bf_search_step_size),
                 display_freq=50,
             )
-            print('Running POT evaluation ...')
             pot_result = pot_eval(
                 train_score, test_score,
                 y_test[-len(test_score):],
@@ -248,15 +252,20 @@ def run_experiment(config, device, log):
             })
             best_valid_metrics.update(pot_result)
 
-    if config.save_dir is not None and best_valid_metrics.get('best_checkpoint'):
-        print(f'Best model: {best_valid_metrics["best_checkpoint"]}')
+    # final save (official always saves after training)
+    if config.save_dir is not None:
+        from omni_anomaly.checkpoint import save_checkpoint
+        path = save_checkpoint(
+            model, config.to_dict(), get_checkpoint_dir(config),
+            filename='model.pt',
+        )
+        print(f'Model saved to {path}')
 
     metrics_path = os.path.join(config.result_dir, 'metrics.json')
     with open(metrics_path, 'w') as f:
         json.dump(best_valid_metrics, f, indent=2, default=str)
-    print(f'Metrics saved to {metrics_path}')
 
-    print('=' * 30 + ' result ' + '=' * 30)
+    print('=' * 30 + 'result' + '=' * 30)
     pprint(best_valid_metrics)
     log.info('Experiment finished')
 
@@ -267,6 +276,9 @@ def main():
     config.update_from_args(args)
     if args.no_early_stop:
         config.early_stop = False
+    if args.posterior_flow_type is not None:
+        pft = args.posterior_flow_type
+        config.posterior_flow_type = None if pft.lower() in ('none', 'null') else pft
     config.x_dim = get_data_dim(config.dataset)
 
     if config.device:
@@ -276,8 +288,10 @@ def main():
 
     log_dir = config.log_dir or 'log'
     os.makedirs(log_dir, exist_ok=True)
-
-    logging.basicConfig(level=logging.WARNING)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    )
 
     with experiment_logging(log_dir, config.dataset) as (log_path, log):
         print(f'Log file: {log_path}')

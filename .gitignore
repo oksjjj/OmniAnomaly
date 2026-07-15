@@ -110,6 +110,12 @@ venv.bak/
 # Virtual environment
 .venv/
 
+# Local reference clones (not part of the project)
+_official_tf/
+_tfsnippet_repo/
+_tfsnippet_ref/
+_haowen_omni/
+
 # --- Datasets (download: download_smd.py / download_smap_msl.py) ---
 ServerMachineDataset/**
 !ServerMachineDataset/.gitkeep

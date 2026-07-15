@@ -1,26 +1,34 @@
 # -*- coding: utf-8 -*-
+"""Distribution helpers (faithful to tfsnippet / OmniAnomaly numerics)."""
 import math
 
 import torch
 
 
+# -0.5 * log(2 * pi)  (same constant as RecurrentDistribution.log_prob_step)
+LOG_2PI_HALF = 0.9189385332046727
 LOG_2PI = math.log(2 * math.pi)
+
+
+def truncated_normal_like(tensor, mean=0.0, std=1.0, trunc_abs=2.0):
+    """Sample matching ``tf.truncated_normal`` (default: clip at ±2 std)."""
+    out = torch.empty_like(tensor)
+    torch.nn.init.trunc_normal_(out, mean=mean, std=std, a=-trunc_abs, b=trunc_abs)
+    return out
 
 
 def gaussian_log_prob(x, mean, std, group_ndims=1):
     """
-    Diagonal Gaussian log probability.
+    Diagonal Gaussian log-density.
 
-    Args:
-        x, mean, std: broadcast-compatible tensors.
-        group_ndims: 0 = no sum; 1 = sum over last dim; 2 = sum over last two dims.
+    Matches OmniAnomaly RecurrentDistribution / zhusuan Normal style:
+      log p = -0.9189385332046727 - log(std)
+              - 0.5 * exp(-2*log(std)) * min(|x-mean|, 1e8)^2
     """
-    precision = 1.0 / (std ** 2 + 1e-8)
-    log_prob = (
-        -0.5 * LOG_2PI
-        - torch.log(std + 1e-8)
-        - 0.5 * precision * torch.clamp((x - mean) ** 2, max=1e16)
-    )
+    logstd = torch.log(std + 1e-12)
+    precision = torch.exp(-2.0 * logstd)
+    diff = torch.clamp(torch.abs(x - mean), max=1e8)
+    log_prob = -LOG_2PI_HALF - logstd - 0.5 * precision * (diff ** 2)
     if group_ndims == 1:
         log_prob = log_prob.sum(dim=-1)
     elif group_ndims == 2:
@@ -29,7 +37,7 @@ def gaussian_log_prob(x, mean, std, group_ndims=1):
 
 
 class DiagonalNormal:
-    """Diagonal Normal distribution helper."""
+    """Diagonal Normal (reparameterized)."""
 
     def __init__(self, mean, std):
         self.mean = mean
@@ -39,7 +47,7 @@ class DiagonalNormal:
         return gaussian_log_prob(x, self.mean, self.std, group_ndims=group_ndims)
 
     def sample(self, n_samples=None):
-        if n_samples is None or n_samples < 2:
+        if n_samples is None:
             noise = torch.randn_like(self.mean)
             return self.mean + self.std * noise
         noise = torch.randn(
@@ -51,8 +59,10 @@ class DiagonalNormal:
 
 class GaussianStateSpacePrior:
     """
-    Linear Gaussian state-space prior: z_t = z_{t-1} + eps, z_0 ~ N(0, I).
-    Matches TFP LinearGaussianStateSpaceModel with identity transition.
+    Linear Gaussian state-space prior with identity transition / observation,
+    matching TFP ``LinearGaussianStateSpaceModel`` used in OmniAnomaly:
+
+        z_0 ~ N(0, I),  z_t ~ N(z_{t-1}, I)
     """
 
     def __init__(self, z_dim, window_length):
@@ -62,36 +72,25 @@ class GaussianStateSpacePrior:
     def log_prob(self, z, group_ndims=1):
         """
         Args:
-            z: (batch, window_length, z_dim) or (n_samples, batch, window_length, z_dim)
+            z: (batch, T, z_dim) or (n_samples, batch, T, z_dim)
+        Returns:
+            log p(z) with last event dims reduced according to group_ndims.
+            Default reduces z_dim only, then sums over time → shape (...,).
         """
-        z0_log_prob = gaussian_log_prob(
+        z0 = gaussian_log_prob(
             z[..., 0, :],
             torch.zeros_like(z[..., 0, :]),
             torch.ones_like(z[..., 0, :]),
             group_ndims=1,
         )
         if z.shape[-2] == 1:
-            return z0_log_prob
+            return z0
 
-        transition_log_prob = gaussian_log_prob(
+        trans = gaussian_log_prob(
             z[..., 1:, :],
             z[..., :-1, :],
             torch.ones_like(z[..., 1:, :]),
             group_ndims=1,
         )
-        # transition_log_prob: (..., window_length-1)
-        transition_log_prob = transition_log_prob.sum(dim=-1)
-        return z0_log_prob + transition_log_prob
-
-    def sample(self, batch_size, n_samples=None, device=None, dtype=torch.float32):
-        shape = (batch_size, self.window_length, self.z_dim)
-        z = torch.zeros(*shape, device=device, dtype=dtype)
-        z[:, 0, :] = torch.randn(batch_size, self.z_dim, device=device, dtype=dtype)
-        for t in range(1, self.window_length):
-            z[:, t, :] = z[:, t - 1, :] + torch.randn(
-                batch_size, self.z_dim, device=device, dtype=dtype,
-            )
-        if n_samples is not None and n_samples > 1:
-            samples = [self.sample(batch_size, None, device, dtype) for _ in range(n_samples)]
-            return torch.stack(samples, dim=0)
-        return z
+        # trans: (..., T-1)
+        return z0 + trans.sum(dim=-1)

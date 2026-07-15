@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+"""Predictor — PyTorch port of omni_anomaly.prediction.Predictor."""
 import time
 
 import numpy as np
@@ -10,7 +11,7 @@ __all__ = ['Predictor']
 
 
 class Predictor:
-    """OmniAnomaly predictor (PyTorch)."""
+    """OmniAnomaly predictor (reconstruction probability)."""
 
     def __init__(self, model, device, batch_size=32, n_z=1, last_point_only=True):
         self.model = model
@@ -35,6 +36,7 @@ class Predictor:
         z_infos = []
         pred_times = []
 
+        print('-' * 30, 'testing', '-' * 30)
         with torch.no_grad():
             for batch_x, in sw.get_iterator([values]):
                 start = time.time()

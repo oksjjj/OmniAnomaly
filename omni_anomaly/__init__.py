@@ -1,1 +1,1 @@
-# OmniAnomaly - PyTorch port with MPS support
+# OmniAnomaly — PyTorch port of https://github.com/NetManAIOps/OmniAnomaly

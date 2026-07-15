@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+"""OmniAnomaly model — PyTorch port of omni_anomaly.model."""
 import torch.nn as nn
 
 from omni_anomaly.flows import PlanarNormalizingFlows
@@ -7,7 +8,12 @@ from omni_anomaly.wrapper import GaussianParamNet, RecurrentGaussianParamNet
 
 
 class OmniAnomaly(nn.Module):
-    """OmniAnomaly model (PyTorch / MPS port)."""
+    """
+    Stochastic recurrent VAE (GRU + VAE + planar NF).
+
+    Architecture mirrors the official TensorFlow implementation:
+    https://github.com/NetManAIOps/OmniAnomaly
+    """
 
     def __init__(self, config):
         super().__init__()
@@ -23,6 +29,7 @@ class OmniAnomaly(nn.Module):
         else:
             self._posterior_flow = None
 
+        # p(x|z) head
         h_for_p_x = GaussianParamNet(
             input_dim=config.z_dim,
             output_dim=config.x_dim,
@@ -33,6 +40,7 @@ class OmniAnomaly(nn.Module):
             std_epsilon=config.std_epsilon,
         )
 
+        # q(z|x) head
         if config.use_connected_z_q:
             h_for_q_z = RecurrentGaussianParamNet(
                 input_dim=config.x_dim,
@@ -81,15 +89,17 @@ class OmniAnomaly(nn.Module):
         return self._posterior_flow
 
     def get_training_loss(self, x, n_z=None):
+        """SGVB loss as in the official ``OmniAnomaly.get_training_loss``."""
         return self._vae.get_training_loss(
             x, posterior_flow=self._posterior_flow, n_z=n_z,
         )
 
     def get_score(self, x, n_z=None, last_point_only=True):
+        """Reconstruction probability (official ``OmniAnomaly.get_score``)."""
         return self._vae.get_reconstruction_log_prob(
             x,
             n_z=n_z,
             posterior_flow=self._posterior_flow,
             last_point_only=last_point_only,
-            per_dim=self.config.get_score_on_dim,
+            per_dim=bool(self.config.get_score_on_dim),
         )
