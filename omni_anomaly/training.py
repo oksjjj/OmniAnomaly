@@ -2,7 +2,9 @@
 """Trainer — PyTorch port of omni_anomaly.training.Trainer."""
 import copy
 import logging
+import os
 import time
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -25,11 +27,11 @@ def _clip_grad_norm_per_tensor(parameters, max_norm):
 
 class Trainer:
     """
-    OmniAnomaly trainer.
+    OmniAnomaly trainer with patience-based early stopping.
 
-    Early-stopping follows tfsnippet ``TrainLoop(early_stopping=True)``:
-    track the best ``valid_loss`` and restore those weights when training
-    finishes. Training is **not** aborted by patience (unlike some ports).
+    When ``early_stop=True``, training stops if validation loss does not
+    improve for ``patience`` consecutive validation checks (after warmup /
+    min epochs), then restores the best weights.
     """
 
     def __init__(
@@ -47,10 +49,14 @@ class Trainer:
         lr_anneal_factor=0.75,
         grad_clip_norm=10.0,
         early_stop=True,
+        patience=30,
+        early_stop_min_epochs=3,
+        early_stop_warmup_steps=300,
         log_dir=None,
         dataset='default',
         checkpoint_dir=None,
         config=None,
+        tensorboard=True,
     ):
         if max_epoch is None and max_step is None:
             raise ValueError('At least one of `max_epoch` and `max_step` '
@@ -69,11 +75,23 @@ class Trainer:
         self.lr_anneal_factor = lr_anneal_factor
         self.grad_clip_norm = grad_clip_norm
         self.early_stop = early_stop
+        self.patience = patience
+        self.early_stop_min_epochs = early_stop_min_epochs
+        self.early_stop_warmup_steps = early_stop_warmup_steps
         self.dataset = dataset
         self.history = TrainHistory(log_dir, dataset) if log_dir else None
         self.checkpoint_dir = checkpoint_dir
         self.config = config or {}
         self.best_checkpoint_path = None
+        self.tb_dir = None
+        self.tb_writer = None
+
+        if log_dir and tensorboard:
+            from torch.utils.tensorboard import SummaryWriter
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            self.tb_dir = os.path.join(log_dir, 'tensorboard', dataset, stamp)
+            os.makedirs(self.tb_dir, exist_ok=True)
+            self.tb_writer = SummaryWriter(self.tb_dir)
 
         # Official code never attaches kernel L2 regularizers; l2_reg in
         # ExpConfig is unused. Do not pass weight_decay.
@@ -86,6 +104,13 @@ class Trainer:
     def _record_step(self, **kwargs):
         if self.history is not None:
             self.history.add(**kwargs)
+
+    def _tb_scalar(self, tag, value, step):
+        if self.tb_writer is None:
+            return
+        if value is None or not np.isfinite(value):
+            return
+        self.tb_writer.add_scalar(tag, value, step)
 
     def _eval_loss(self, data, batch_size):
         self.model.eval()
@@ -153,107 +178,217 @@ class Trainer:
         lr = self.initial_lr
         best_valid_loss = None
         best_state = None
+        patience_counter = 0
+        early_stopped = False
         train_batch_times = []
         valid_batch_times = []
 
         global_step = 0
         self._log(f'train_values: {train_values.shape}')
+        if self.early_stop:
+            self._log(
+                f'Early stop: patience={self.patience} '
+                f'(valid checks), min_epochs={self.early_stop_min_epochs}, '
+                f'warmup_steps={self.early_stop_warmup_steps}'
+            )
+        if self.tb_dir:
+            self._log(f'TensorBoard log dir: {self.tb_dir}')
+            self._log(
+                f'  view: tensorboard --logdir '
+                f'{os.path.join(os.path.dirname(os.path.dirname(self.tb_dir)))}'
+            )
 
         epoch = 0
         stop = False
-        while not stop:
-            epoch += 1
-            if self.max_epoch is not None and epoch > self.max_epoch:
-                break
-
-            self.model.train()
-            epoch_start = time.time()
-
-            for batch_x, in train_sw.get_iterator([train_values]):
-                if self.max_step is not None and global_step >= self.max_step:
-                    stop = True
+        try:
+            while not stop:
+                epoch += 1
+                if self.max_epoch is not None and epoch > self.max_epoch:
                     break
 
-                batch_start = time.time()
-                x = torch.from_numpy(batch_x).to(self.device)
+                self.model.train()
+                epoch_start = time.time()
 
-                self.optimizer.zero_grad()
-                loss = self.model.get_training_loss(x, n_z=self.n_z)
-                loss.backward()
+                for batch_x, in train_sw.get_iterator([train_values]):
+                    if self.max_step is not None and global_step >= self.max_step:
+                        stop = True
+                        break
 
-                if self.grad_clip_norm:
-                    _clip_grad_norm_per_tensor(
-                        self.model.parameters(), self.grad_clip_norm,
-                    )
+                    batch_start = time.time()
+                    x = torch.from_numpy(batch_x).to(self.device)
 
-                self.optimizer.step()
-                train_batch_times.append(time.time() - batch_start)
-                global_step += 1
+                    self.optimizer.zero_grad()
+                    loss = self.model.get_training_loss(x, n_z=self.n_z)
+                    loss.backward()
 
-                if global_step % self.valid_step_freq == 0:
-                    valid_start = time.time()
-                    valid_loss = self._eval_loss(
-                        valid_values, self.valid_batch_size,
-                    )
-                    valid_batch_times.append(time.time() - valid_start)
-                    train_duration = time.time() - epoch_start
-
-                    is_best = (
-                        best_valid_loss is None or valid_loss < best_valid_loss
-                    )
-                    if is_best:
-                        best_valid_loss = valid_loss
-                        if self.early_stop:
-                            best_state = copy.deepcopy(self.model.state_dict())
-                        self._save_best_checkpoint(
-                            best_valid_loss, epoch, global_step,
+                    if self.grad_clip_norm:
+                        _clip_grad_norm_per_tensor(
+                            self.model.parameters(), self.grad_clip_norm,
                         )
 
-                    self._log(
-                        f'epoch={epoch} step={global_step} '
-                        f'loss={loss.item():.6f} valid_loss={valid_loss:.6f} '
-                        f'lr={lr:.6g} best_valid_loss={best_valid_loss:.6f} '
-                        f'train_time={train_duration:.2f}s'
+                    self.optimizer.step()
+                    train_batch_times.append(time.time() - batch_start)
+                    global_step += 1
+
+                    self._tb_scalar(
+                        'train/loss_step', float(loss.item()), global_step,
                     )
+
+                    if global_step % self.valid_step_freq == 0:
+                        valid_start = time.time()
+                        valid_loss = self._eval_loss(
+                            valid_values, self.valid_batch_size,
+                        )
+                        valid_batch_times.append(time.time() - valid_start)
+                        train_duration = time.time() - epoch_start
+
+                        track_stop = global_step > self.early_stop_warmup_steps
+                        is_best = False
+                        if track_stop:
+                            is_best = (
+                                best_valid_loss is None
+                                or valid_loss < best_valid_loss
+                            )
+                            if is_best:
+                                best_valid_loss = valid_loss
+                                best_state = copy.deepcopy(
+                                    self.model.state_dict(),
+                                )
+                                patience_counter = 0
+                                self._save_best_checkpoint(
+                                    best_valid_loss, epoch, global_step,
+                                )
+                            elif self.early_stop:
+                                patience_counter += 1
+                        else:
+                            # Warmup: still track a provisional best for restore
+                            if (
+                                best_valid_loss is None
+                                or valid_loss < best_valid_loss
+                            ):
+                                best_valid_loss = valid_loss
+                                best_state = copy.deepcopy(
+                                    self.model.state_dict(),
+                                )
+                                self._save_best_checkpoint(
+                                    best_valid_loss, epoch, global_step,
+                                )
+
+                        best_str = (
+                            f'{best_valid_loss:.6f}'
+                            if best_valid_loss is not None else 'nan'
+                        )
+                        warmup_tag = '' if track_stop else ' [warmup]'
+                        patience_tag = (
+                            f' patience={patience_counter}/{self.patience}'
+                            if self.early_stop and track_stop else ''
+                        )
+                        self._log(
+                            f'epoch={epoch} step={global_step} '
+                            f'loss={loss.item():.6f} '
+                            f'valid_loss={valid_loss:.6f} '
+                            f'lr={lr:.6g} best_valid_loss={best_str}'
+                            f'{patience_tag} '
+                            f'train_time={train_duration:.2f}s'
+                            f'{warmup_tag}'
+                        )
+                        self._record_step(
+                            epoch=epoch,
+                            step=global_step,
+                            loss=float(loss.item()),
+                            valid_loss=float(valid_loss),
+                            lr=float(lr),
+                            best_valid_loss=(
+                                float(best_valid_loss)
+                                if best_valid_loss is not None
+                                else float('nan')
+                            ),
+                            patience=patience_counter,
+                            is_best=is_best,
+                            warmup=not track_stop,
+                            train_time_sec=float(train_duration),
+                            valid_time_sec=float(valid_batch_times[-1]),
+                        )
+                        self._tb_scalar(
+                            'train/loss', float(loss.item()), global_step,
+                        )
+                        self._tb_scalar(
+                            'valid/loss', float(valid_loss), global_step,
+                        )
+                        if best_valid_loss is not None:
+                            self._tb_scalar(
+                                'valid/best_loss',
+                                float(best_valid_loss),
+                                global_step,
+                            )
+                        self._tb_scalar('train/lr', float(lr), global_step)
+                        self._tb_scalar(
+                            'train/epoch', float(epoch), global_step,
+                        )
+                        self._tb_scalar(
+                            'train/patience',
+                            float(patience_counter),
+                            global_step,
+                        )
+                        if self.tb_writer is not None:
+                            self.tb_writer.flush()
+
+                        if (
+                            self.early_stop
+                            and track_stop
+                            and epoch >= self.early_stop_min_epochs
+                            and patience_counter >= self.patience
+                        ):
+                            self._log(
+                                f'Early stopping at epoch {epoch}, '
+                                f'step {global_step} '
+                                f'(patience={self.patience})'
+                            )
+                            early_stopped = True
+                            stop = True
+                            break
+
+                        epoch_start = time.time()
+
+                if stop:
+                    break
+
+                if self.lr_anneal_epochs and epoch % self.lr_anneal_epochs == 0:
+                    lr *= self.lr_anneal_factor
+                    for pg in self.optimizer.param_groups:
+                        pg['lr'] = lr
+                    msg = f'Learning rate decreased to {lr}'
+                    self._log(msg)
                     self._record_step(
+                        event='lr_anneal',
                         epoch=epoch,
                         step=global_step,
-                        loss=float(loss.item()),
-                        valid_loss=float(valid_loss),
                         lr=float(lr),
-                        best_valid_loss=float(best_valid_loss),
-                        is_best=is_best,
-                        train_time_sec=float(train_duration),
-                        valid_time_sec=float(valid_batch_times[-1]),
                     )
-                    epoch_start = time.time()
+                    self._tb_scalar('train/lr', float(lr), global_step)
+        finally:
+            if self.tb_writer is not None:
+                self.tb_writer.close()
 
-            if stop:
-                break
-
-            if self.lr_anneal_epochs and epoch % self.lr_anneal_epochs == 0:
-                lr *= self.lr_anneal_factor
-                for pg in self.optimizer.param_groups:
-                    pg['lr'] = lr
-                msg = f'Learning rate decreased to {lr}'
-                self._log(msg)
-                self._record_step(
-                    event='lr_anneal', epoch=epoch, step=global_step, lr=float(lr),
-                )
-
-        # TrainLoop early_stopping: restore best variables at the end
-        if self.early_stop and best_state is not None:
+        if best_state is not None:
             self.model.load_state_dict(best_state)
 
         metrics = {
             'best_valid_loss': float(
                 best_valid_loss if best_valid_loss is not None else float('nan')
             ),
-            'train_time': float(np.mean(train_batch_times) if train_batch_times else 0),
-            'valid_time': float(np.mean(valid_batch_times) if valid_batch_times else 0),
+            'train_time': float(
+                np.mean(train_batch_times) if train_batch_times else 0
+            ),
+            'valid_time': float(
+                np.mean(valid_batch_times) if valid_batch_times else 0
+            ),
             'stopped_epoch': epoch,
             'stopped_step': global_step,
+            'early_stopped': early_stopped,
             'best_checkpoint': self.best_checkpoint_path,
         }
+        if self.tb_dir:
+            metrics['tensorboard_dir'] = self.tb_dir
         metrics.update(self._save_history())
         return metrics

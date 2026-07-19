@@ -138,3 +138,5 @@ log/**
 !log/.gitkeep
 *.pkl
 *.pt
+
+*.ipynb

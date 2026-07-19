@@ -10,7 +10,6 @@ import os
 import pickle
 import time
 import warnings
-from pprint import pprint
 
 import numpy as np
 import torch
@@ -68,7 +67,11 @@ class ExpConfig:
     valid_step_freq = 100
     gradient_clip_norm = 10.
 
-    early_stop = True  # restore best valid weights at end (TrainLoop style)
+    early_stop = True
+    early_stop_patience = 30       # consecutive valid checks without improvement
+    early_stop_min_epochs = 3      # do not stop before this many epochs
+    early_stop_warmup_steps = 300  # ignore patience counting during warmup
+
 
     # pot parameters
     # recommend values for `level`:
@@ -91,6 +94,7 @@ class ExpConfig:
     # PyTorch-only
     log_dir = 'log'
     device = None  # auto: mps > cuda > cpu
+    tensorboard = True
 
     def to_dict(self):
         return {
@@ -124,15 +128,98 @@ def parse_args():
                         help='mps / cuda / cpu (default: auto)')
     parser.add_argument('--valid_step_freq', type=int, default=None)
     parser.add_argument('--no_early_stop', action='store_true',
-                        help='Do not restore best validation weights at end')
+                        help='Disable patience-based early stopping')
+    parser.add_argument('--early_stop_patience', type=int, default=None,
+                        help='Valid checks without improvement before stop')
+    parser.add_argument('--early_stop_min_epochs', type=int, default=None)
+    parser.add_argument('--early_stop_warmup_steps', type=int, default=None)
     parser.add_argument('--posterior_flow_type', type=str, default=None,
                         help="'nf' or 'none'")
+    parser.add_argument('--no_tensorboard', action='store_true',
+                        help='Disable TensorBoard logging')
     return parser.parse_args()
 
 
 def get_checkpoint_dir(config):
     base = config.save_dir or 'model'
     return os.path.join(base, config.dataset)
+
+
+def _fmt(value, digits=4):
+    """Format metric values for readable log output."""
+    if value is None:
+        return '-'
+    try:
+        if isinstance(value, (float, np.floating)):
+            return f'{float(value):.{digits}f}'
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        # numpy scalars / strings that look numeric
+        return f'{float(value):.{digits}f}'
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def print_metrics_summary(metrics):
+    """
+    Print evaluation results in a readable layout.
+
+    POT is the primary metric (threshold from train scores only).
+    best-F1 is an oracle upper bound (threshold chosen on test labels).
+    """
+    has_pot = 'pot-f1' in metrics
+    has_bf = 'best-f1' in metrics
+
+    print()
+    print('=' * 60)
+    print(' EVALUATION SUMMARY')
+    print('=' * 60)
+
+    if has_pot:
+        print()
+        print('[POT]  <-- primary metric (no test-label peeking)')
+        print('-' * 60)
+        print(f'  F1          {_fmt(metrics.get("pot-f1"))}')
+        print(f'  Precision   {_fmt(metrics.get("pot-precision"))}')
+        print(f'  Recall      {_fmt(metrics.get("pot-recall"))}')
+        print(f'  TP / FP     {_fmt(metrics.get("pot-TP"), 0)} / {_fmt(metrics.get("pot-FP"), 0)}')
+        print(f'  TN / FN     {_fmt(metrics.get("pot-TN"), 0)} / {_fmt(metrics.get("pot-FN"), 0)}')
+        print(f'  Threshold   {_fmt(metrics.get("pot-threshold"), 6)}')
+        print(f'  Latency     {_fmt(metrics.get("pot-latency"))}')
+    else:
+        print()
+        print('[POT]  (skipped — no test labels)')
+
+    if has_bf:
+        print()
+        print('[best-F1]  <-- oracle upper bound (threshold fit on test labels)')
+        print('-' * 60)
+        print(f'  F1          {_fmt(metrics.get("best-f1"))}')
+        print(f'  Precision   {_fmt(metrics.get("precision"))}')
+        print(f'  Recall      {_fmt(metrics.get("recall"))}')
+        print(f'  TP / FP     {_fmt(metrics.get("TP"), 0)} / {_fmt(metrics.get("FP"), 0)}')
+        print(f'  TN / FN     {_fmt(metrics.get("TN"), 0)} / {_fmt(metrics.get("FN"), 0)}')
+        print(f'  Threshold   {_fmt(metrics.get("threshold"), 6)}')
+        print(f'  Latency     {_fmt(metrics.get("latency"))}')
+
+    print()
+    print('[Training]')
+    print('-' * 60)
+    print(f'  best valid loss   {_fmt(metrics.get("best_valid_loss"))}')
+    print(f'  stopped epoch     {_fmt(metrics.get("stopped_epoch"), 0)}')
+    print(f'  stopped step      {_fmt(metrics.get("stopped_step"), 0)}')
+    if metrics.get('train_time') is not None:
+        print(f'  train time/epoch  {_fmt(metrics.get("train_time"))}s')
+    if metrics.get('pred_total_time') is not None:
+        print(f'  pred total time   {_fmt(metrics.get("pred_total_time"))}s')
+    if metrics.get('early_stopped') is not None:
+        print(f'  early stopped      {metrics.get("early_stopped")}')
+    if metrics.get('best_checkpoint'):
+        print(f'  best checkpoint   {metrics["best_checkpoint"]}')
+    if metrics.get('tensorboard_dir'):
+        print(f'  tensorboard       {metrics["tensorboard_dir"]}')
+    print('=' * 60)
+    print()
 
 
 def run_experiment(config, device, log):
@@ -171,10 +258,14 @@ def run_experiment(config, device, log):
         grad_clip_norm=config.gradient_clip_norm,
         valid_step_freq=config.valid_step_freq,
         early_stop=config.early_stop,
+        patience=config.early_stop_patience,
+        early_stop_min_epochs=config.early_stop_min_epochs,
+        early_stop_warmup_steps=config.early_stop_warmup_steps,
         log_dir=log_dir,
         dataset=config.dataset,
         checkpoint_dir=checkpoint_dir if config.save_dir is not None else None,
         config=config.to_dict(),
+        tensorboard=config.tensorboard,
     )
 
     predictor = Predictor(
@@ -264,9 +355,9 @@ def run_experiment(config, device, log):
     metrics_path = os.path.join(config.result_dir, 'metrics.json')
     with open(metrics_path, 'w') as f:
         json.dump(best_valid_metrics, f, indent=2, default=str)
+    print(f'Metrics saved to {metrics_path}')
 
-    print('=' * 30 + 'result' + '=' * 30)
-    pprint(best_valid_metrics)
+    print_metrics_summary(best_valid_metrics)
     log.info('Experiment finished')
 
 
@@ -276,6 +367,8 @@ def main():
     config.update_from_args(args)
     if args.no_early_stop:
         config.early_stop = False
+    if args.no_tensorboard:
+        config.tensorboard = False
     if args.posterior_flow_type is not None:
         pft = args.posterior_flow_type
         config.posterior_flow_type = None if pft.lower() in ('none', 'null') else pft

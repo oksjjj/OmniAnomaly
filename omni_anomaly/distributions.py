@@ -69,13 +69,12 @@ class GaussianStateSpacePrior:
         self.z_dim = z_dim
         self.window_length = window_length
 
-    def log_prob(self, z, group_ndims=1):
+    def log_prob(self, z, group_ndims=1, reduce_time=False):
         """
         Args:
             z: (batch, T, z_dim) or (n_samples, batch, T, z_dim)
-        Returns:
-            log p(z) with last event dims reduced according to group_ndims.
-            Default reduces z_dim only, then sums over time → shape (...,).
+            reduce_time: if True, sum over time → shape (...,);
+                if False (default for SGVB), return per-timestep (..., T)
         """
         z0 = gaussian_log_prob(
             z[..., 0, :],
@@ -84,13 +83,17 @@ class GaussianStateSpacePrior:
             group_ndims=1,
         )
         if z.shape[-2] == 1:
-            return z0
+            log_p = z0.unsqueeze(-1)
+        else:
+            trans = gaussian_log_prob(
+                z[..., 1:, :],
+                z[..., :-1, :],
+                torch.ones_like(z[..., 1:, :]),
+                group_ndims=1,
+            )
+            # (..., T): [log p(z0), log p(z1|z0), ..., log p(zT|zT-1)]
+            log_p = torch.cat([z0.unsqueeze(-1), trans], dim=-1)
 
-        trans = gaussian_log_prob(
-            z[..., 1:, :],
-            z[..., :-1, :],
-            torch.ones_like(z[..., 1:, :]),
-            group_ndims=1,
-        )
-        # trans: (..., T-1)
-        return z0 + trans.sum(dim=-1)
+        if reduce_time:
+            return log_p.sum(dim=-1)
+        return log_p

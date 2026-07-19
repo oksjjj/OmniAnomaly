@@ -91,21 +91,22 @@ class VAE(nn.Module):
 
     def model_net(self, z, x=None, n_z=None):
         """
-        Derive p(x|h(z)) (and optional p(z)).
+        Derive p(x|h(z)) and p(z).
 
         RNN encoder averages over n_z when z is 4-D (matches ``wrapper.rnn``).
+        ``log_p_z`` / ``log_p_x`` are per-timestep (..., T) for SGVB.
         """
         if self.use_connected_z_p:
-            log_p_z = self.p_z.log_prob(z, group_ndims=1)
+            # GSSM: z0 ~ N(0,I), zt ~ N(z_{t-1}, I)  → shape (..., T)
+            log_p_z = self.p_z.log_prob(z, group_ndims=1, reduce_time=False)
         else:
+            # Independent N(0,I) at each timestep → shape (..., T)
             log_p_z = gaussian_log_prob(
                 z,
                 torch.zeros_like(z),
                 torch.ones_like(z),
                 group_ndims=1,
             )
-            # sum over time to match connected prior reduction
-            log_p_z = log_p_z.sum(dim=-1)
 
         x_params = self.h_for_p_x(z)
         p_x = DiagonalNormal(x_params['mean'], x_params['std'])
@@ -113,15 +114,10 @@ class VAE(nn.Module):
         log_p_x = None
         log_p_x_ungrouped = None
         if x is not None:
-            # group_ndims=0 → keep feature dim (as in OmniAnomaly.get_training_loss)
-            if z.dim() == 4:
-                # params already mean-reduced over n_z inside encoder;
-                # broadcast observation for optional multi-sample scoring
-                x_obs = x
-            else:
-                x_obs = x
+            # group_ndims=0 → keep feature dim, then sum features → (..., T)
+            x_obs = x
             log_p_x_ungrouped = p_x.log_prob(x_obs, group_ndims=0)
-            log_p_x = log_p_x_ungrouped.sum(dim=-1)  # sum features → (..., T)
+            log_p_x = log_p_x_ungrouped.sum(dim=-1)
 
         return {
             'log_p_x': log_p_x,
@@ -133,25 +129,24 @@ class VAE(nn.Module):
 
     def get_training_loss(self, x, posterior_flow=None, n_z=None):
         """
-        OmniAnomaly training loss (NOT the default VAE ELBO).
+        SGVB training loss with GSSM prior connection:
 
-        From ``OmniAnomaly.get_training_loss``:
+            log_joint = log p(x|z) + log p(z)
+            loss = mean(log q(z|x) - log_joint)
 
-            chain = vae.chain(x, ...)
-            log_joint = sum(model['x'].log_prob(group_ndims=0), -1)  # recon only
-            loss = mean(SGVB) = mean(log_q(z|x) - log_joint)
-
-        Prior ``log p(z)`` is intentionally excluded (matches original code).
+        Equivalent to minimizing -ELBO =
+            -E[log p(x|z) + log p(z) - log q(z|x)].
         """
         q_out = self.variational(x, n_z=n_z, posterior_flow=posterior_flow)
         z = q_out['z']
         log_q = q_out['log_q']  # (batch, T) or (n_z, batch, T)
 
         p_out = self.model_net(z, x=x, n_z=n_z)
-        log_joint = p_out['log_p_x']  # (batch, T)  — reconstruction only
+        log_p_x = p_out['log_p_x']  # (batch, T)
+        log_p_z = p_out['log_p_z']  # (..., T) GSSM / independent prior
+        log_joint = log_p_x + log_p_z
 
-        # SGVB: latent_log_prob - log_joint ; then reduce_mean over all elems
-        # (and over n_z axis if present — sgvb_estimator mean over axis=0)
+        # SGVB: latent_log_prob - log_joint ; mean over sample dim then all elems
         sgvb = log_q - log_joint
         if n_z is not None and sgvb.dim() == 3:
             sgvb = sgvb.mean(dim=0)
