@@ -117,28 +117,38 @@ def bf_search(score, label, start, end=None, step_num=1, display_freq=1, verbose
     return m, m_t
 
 
-def pot_eval(init_score, score, label, q=1e-3, level=0.02):
+def pot_eval(init_score, score, label, q=1e-4, level=0.02):
     """
     Run POT method on given score.
-    Args:
-        init_score (np.ndarray): The data to get init threshold.
-            For `OmniAnomaly`, it should be the anomaly score of train set.
-        score (np.ndarray): The data to run POT method.
-            For `OmniAnomaly`, it should be the anomaly score of test set.
-        label:
-        q (float): Detection level (risk)
-        level (float): Probability associated with the initial threshold t
 
-    Returns:
-        dict: pot result dict
+    Args:
+        init_score (np.ndarray): Anomaly scores of the train set (for init).
+        score (np.ndarray): Anomaly scores of the test set.
+        label: Ground-truth labels for the test set.
+        q (float): Detection level / risk. Paper uses ``1e-4``.
+        level (float): Low quantile for the initial threshold ``t``
+            (SMAP 0.07, MSL 0.01, SMD subset-specific).
+
+    Notes:
+        ``SPOT.run(dynamic=False)`` overwrites ``extreme_quantile`` with
+        ``init_threshold`` after the first exceedance.  We therefore take the
+        GPD-fitted extreme quantile from ``initialize()`` as ``pot_th``,
+        matching the intended POT procedure (paper / standard SPOT).
     """
-    s = SPOT(q)  # SPOT object
-    s.fit(init_score, score)  # data import
-    s.initialize(level=level, min_extrema=True)  # initialization step
-    ret = s.run(dynamic=False)  # run
+    s = SPOT(q)
+    s.fit(init_score, score)
+    s.initialize(level=level, min_extrema=True)
+
+    # GPD extreme quantile computed in initialize (before run can overwrite it)
+    gpd_extreme_quantile = float(s.extreme_quantile)
+    pot_th = -gpd_extreme_quantile
+
+    ret = s.run(dynamic=False)
     print(len(ret['alarms']))
     print(len(ret['thresholds']))
-    pot_th = -np.mean(ret['thresholds'])
+    print('POT threshold (GPD extreme quantile):', pot_th,
+          '(init_threshold on negated scores:', float(s.init_threshold), ')')
+
     pred, p_latency = adjust_predicts(score, label, pot_th, calc_latency=True)
     p_t = calc_point2point(pred, label)
     print('POT result: ', p_t, pot_th, p_latency)
@@ -151,5 +161,7 @@ def pot_eval(init_score, score, label, q=1e-3, level=0.02):
         'pot-FP': p_t[5],
         'pot-FN': p_t[6],
         'pot-threshold': pot_th,
-        'pot-latency': p_latency
+        'pot-latency': p_latency,
+        'pot-q': q,
+        'pot-level': level,
     }

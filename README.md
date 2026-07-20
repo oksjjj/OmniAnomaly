@@ -53,12 +53,13 @@ python main.py
 설정은 원본과 같은 `ExpConfig` 기본값을 사용합니다.
 
 ```bash
-# SMD
-python main.py --dataset machine-1-1 --max_epoch 10 --level 0.005
+# level은 데이터셋에 따라 자동 설정 (수동: --level 0.07)
+# 디바이스 기본: MPS > CUDA > CPU (--device cuda 로 강제 가능)
 
-# SMAP / MSL
-python main.py --dataset SMAP --max_epoch 10 --level 0.07
-python main.py --dataset MSL --max_epoch 10 --level 0.01
+# SMD / SMAP / MSL
+python main.py --dataset machine-1-1 --max_epoch 20
+python main.py --dataset SMAP --max_epoch 20
+python main.py --dataset MSL --max_epoch 20
 ```
 
 결과·점수는 `result/`, 체크포인트는 `model/{dataset}/`에 저장됩니다.
@@ -66,7 +67,7 @@ python main.py --dataset MSL --max_epoch 10 --level 0.01
 CUDA에서 실행:
 
 ```bash
-python main.py --dataset SMAP --max_epoch 10 --level 0.07 --device cuda
+python main.py --dataset SMAP --max_epoch 20 --device cuda
 ```
 
 ### TensorBoard
@@ -79,15 +80,23 @@ tensorboard --logdir log/tensorboard
 
 브라우저에서 `http://localhost:6006` 을 여세요. 끄려면 `--no_tensorboard`.
 
-## POT level 권장값 (원본 README)
+## POT level 권장값 (논문 Appendix B)
 
-| 데이터셋 | level |
-|----------|-------|
-| SMAP | 0.07 |
-| MSL | 0.01 |
-| SMD group 1 | 0.005 |
-| SMD group 2 | 0.0075 |
-| SMD group 3 | 0.0001 |
+| 데이터셋 | level (low quantile) | q |
+|----------|----------------------|---|
+| SMAP | **0.07** | **1e-4** |
+| MSL | 0.01 | **1e-4** |
+| SMD group 1 | 0.005 | **1e-4** |
+| SMD group 2 | 0.0025 | **1e-4** |
+| SMD group 3 | 0.0001 | **1e-4** |
+
+```bash
+# 저장된 score로 POT만 재평가 (재학습/재스코어링 없음)
+python eval_from_scores.py --dataset SMAP
+
+# 체크포인트에서 scoring+평가만 (학습 스킵)
+python main.py --dataset SMAP --max_epoch 0 --restore_dir model/SMAP
+```
 
 ## 디렉터리
 

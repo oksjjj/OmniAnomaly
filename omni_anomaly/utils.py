@@ -35,6 +35,29 @@ def get_data_dim(dataset):
         raise ValueError('unknown dataset ' + str(dataset))
 
 
+def default_pot_level(dataset):
+    """
+    Paper Appendix B POT low quantile by dataset.
+
+    SMAP 0.07, MSL 0.01,
+    SMD machine-1-* 0.005, machine-2-* 0.0025, machine-3-* 0.0001.
+    """
+    name = str(dataset)
+    if name == 'SMAP':
+        return 0.07
+    if name == 'MSL':
+        return 0.01
+    if name.startswith('machine-1-'):
+        return 0.005
+    if name.startswith('machine-2-'):
+        return 0.0025
+    if name.startswith('machine-3-'):
+        return 0.0001
+    if name.startswith('machine'):
+        return 0.005  # fallback for unexpected SMD names
+    raise ValueError('unknown dataset ' + name)
+
+
 def get_data(dataset, max_train_size=None, max_test_size=None, print_log=True,
              do_preprocess=True, train_start=0, test_start=0):
     """

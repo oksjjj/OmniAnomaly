@@ -52,6 +52,7 @@ class Trainer:
         patience=30,
         early_stop_min_epochs=3,
         early_stop_warmup_steps=300,
+        l2_reg=0.0001,
         log_dir=None,
         dataset='default',
         checkpoint_dir=None,
@@ -78,6 +79,7 @@ class Trainer:
         self.patience = patience
         self.early_stop_min_epochs = early_stop_min_epochs
         self.early_stop_warmup_steps = early_stop_warmup_steps
+        self.l2_reg = l2_reg
         self.dataset = dataset
         self.history = TrainHistory(log_dir, dataset) if log_dir else None
         self.checkpoint_dir = checkpoint_dir
@@ -93,10 +95,10 @@ class Trainer:
             os.makedirs(self.tb_dir, exist_ok=True)
             self.tb_writer = SummaryWriter(self.tb_dir)
 
-        # Official code never attaches kernel L2 regularizers; l2_reg in
-        # ExpConfig is unused. Do not pass weight_decay.
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
-
+        # Paper: L2 regularization coefficient 1e-4 on all layers
+        self.optimizer = torch.optim.Adam(
+            model.parameters(), lr=initial_lr, weight_decay=l2_reg,
+        )
     def _log(self, message):
         logger.info(message)
         print(message)

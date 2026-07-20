@@ -21,7 +21,7 @@ from omni_anomaly.model import OmniAnomaly
 from omni_anomaly.prediction import Predictor
 from omni_anomaly.train_logger import experiment_logging
 from omni_anomaly.training import Trainer
-from omni_anomaly.utils import get_data_dim, get_data, save_z
+from omni_anomaly.utils import default_pot_level, get_data_dim, get_data, save_z
 
 
 class ExpConfig:
@@ -43,11 +43,11 @@ class ExpConfig:
     dense_dim = 500
     posterior_flow_type = 'nf'  # 'nf' or None
     nf_layers = 20
-    max_epoch = 10
+    max_epoch = 20  # paper: run for 20 epochs with early stopping
     train_start = 0
     max_train_size = None
     batch_size = 50
-    l2_reg = 0.0001  # kept for API parity; unused in the official graph
+    l2_reg = 0.0001  # paper: L2 coefficient 1e-4 on all layers
     initial_lr = 0.001
     lr_anneal_factor = 0.5
     lr_anneal_epoch_freq = 40
@@ -73,14 +73,11 @@ class ExpConfig:
     early_stop_warmup_steps = 300  # ignore patience counting during warmup
 
 
-    # pot parameters
-    # recommend values for `level`:
-    # SMAP: 0.07
-    # MSL: 0.01
-    # SMD group 1: 0.0050
-    # SMD group 2: 0.0075
-    # SMD group 3: 0.0001
-    level = 0.01
+    # pot parameters (paper Appendix B)
+    # q = 1e-4 for all datasets
+    # level is auto-set from dataset via default_pot_level() unless --level is given
+    level = None
+    pot_q = 1e-4
 
     # outputs config
     save_z = False
@@ -119,7 +116,11 @@ def parse_args():
     parser.add_argument('--initial_lr', type=float, default=None)
     parser.add_argument('--z_dim', type=int, default=None)
     parser.add_argument('--window_length', type=int, default=None)
-    parser.add_argument('--level', type=float, default=None)
+    parser.add_argument('--level', type=float, default=None,
+                        help='POT low quantile (default: auto by dataset; '
+                             'SMAP 0.07, MSL 0.01, SMD 0.005/0.0025/0.0001)')
+    parser.add_argument('--pot_q', type=float, default=None,
+                        help='POT risk q (paper: 1e-4)')
     parser.add_argument('--save_dir', type=str, default=None)
     parser.add_argument('--restore_dir', type=str, default=None)
     parser.add_argument('--result_dir', type=str, default=None)
@@ -230,6 +231,7 @@ def run_experiment(config, device, log):
     print('=' * 30 + ' Configurations ' + '=' * 30)
     print(json.dumps(config.to_dict(), indent=2, default=str))
     print(f'Using device: {device}')
+    print(f'POT level={config.level}, q={config.pot_q}')
 
     with open(os.path.join(config.result_dir, 'config.json'), 'w') as f:
         json.dump(config.to_dict(), f, indent=2, default=str)
@@ -261,6 +263,7 @@ def run_experiment(config, device, log):
         patience=config.early_stop_patience,
         early_stop_min_epochs=config.early_stop_min_epochs,
         early_stop_warmup_steps=config.early_stop_warmup_steps,
+        l2_reg=config.l2_reg,
         log_dir=log_dir,
         dataset=config.dataset,
         checkpoint_dir=checkpoint_dir if config.save_dir is not None else None,
@@ -328,6 +331,7 @@ def run_experiment(config, device, log):
             pot_result = pot_eval(
                 train_score, test_score,
                 y_test[-len(test_score):],
+                q=config.pot_q,
                 level=config.level,
             )
             best_valid_metrics.update({
@@ -373,11 +377,14 @@ def main():
         pft = args.posterior_flow_type
         config.posterior_flow_type = None if pft.lower() in ('none', 'null') else pft
     config.x_dim = get_data_dim(config.dataset)
+    if config.level is None:
+        config.level = default_pot_level(config.dataset)
 
     if config.device:
         device = torch.device(config.device)
     else:
-        device = get_device()
+        # auto: MPS (Apple Silicon) > CUDA > CPU
+        device = get_device(prefer_mps=True)
 
     log_dir = config.log_dir or 'log'
     os.makedirs(log_dir, exist_ok=True)
@@ -386,10 +393,14 @@ def main():
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     )
 
-    with experiment_logging(log_dir, config.dataset) as (log_path, log):
+    with experiment_logging(
+        log_dir, config.dataset,
+        mode='eval' if config.max_epoch == 0 else 'train',
+    ) as (log_path, log):
         print(f'Log file: {log_path}')
         log.info('Experiment started')
         log.info('Device: %s', device)
+        log.info('POT level=%s (q=%s)', config.level, config.pot_q)
         run_experiment(config, device, log)
 
 

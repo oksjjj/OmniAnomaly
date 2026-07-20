@@ -66,9 +66,13 @@ def _write_error(text, teed_stderr):
 
 
 @contextmanager
-def experiment_logging(log_dir, dataset, log_filename=None):
+def experiment_logging(log_dir, dataset, log_filename=None, mode='train'):
     """
     Capture stdout, stderr, exceptions, and warnings into a log file.
+
+    Args:
+        mode: ``'train'`` or ``'eval'`` — used in default filename
+              ``{dataset}_{timestamp}_{mode}.log``.
 
     Yields:
         tuple: (log_path, logger)
@@ -76,7 +80,8 @@ def experiment_logging(log_dir, dataset, log_filename=None):
     os.makedirs(log_dir, exist_ok=True)
     if log_filename is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_filename = f'{dataset}_{timestamp}_train.log'
+        mode = mode if mode in ('train', 'eval') else 'train'
+        log_filename = f'{dataset}_{timestamp}_{mode}.log'
 
     log_path = os.path.join(log_dir, log_filename)
     log_file = open(log_path, 'w', encoding='utf-8')
