@@ -1,4 +1,9 @@
 # -*- coding: utf-8 -*-
+import os
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import auc
 
@@ -17,7 +22,12 @@ def _prepare_rank_inputs(score, label):
 
 
 def _calc_pa_curves(score, label, n_thresholds=1000):
-    """Build ROC / PR curves with point adjustment at each threshold."""
+    """
+    Build ROC / PR curves with point adjustment at each threshold.
+
+    Returns:
+        dict with auroc, auprc, and sorted curve arrays (fpr/tpr, recall/precision).
+    """
     score, y_true = _prepare_rank_inputs(score, label)
     thresholds = np.linspace(score.min() - 1e-6, score.max() + 1e-6, n_thresholds)
 
@@ -40,31 +50,144 @@ def _calc_pa_curves(score, label, n_thresholds=1000):
         fprs.append(fp / (fp + tn + 1e-8))
         tprs.append(tp / (tp + fn + 1e-8))
 
-    order_pr = np.argsort(recalls)
-    order_roc = np.argsort(fprs)
-    auprc = auc(np.array(recalls)[order_pr], np.array(precisions)[order_pr])
-    auroc = auc(np.array(fprs)[order_roc], np.array(tprs)[order_roc])
-    return auroc, auprc
+    fpr = np.asarray(fprs, dtype=float)
+    tpr = np.asarray(tprs, dtype=float)
+    precision = np.asarray(precisions, dtype=float)
+    recall = np.asarray(recalls, dtype=float)
+
+    order_roc = np.argsort(fpr)
+    order_pr = np.argsort(recall)
+    fpr_s, tpr_s = fpr[order_roc], tpr[order_roc]
+    recall_s, precision_s = recall[order_pr], precision[order_pr]
+
+    return {
+        'auroc': float(auc(fpr_s, tpr_s)),
+        'auprc': float(auc(recall_s, precision_s)),
+        'fpr': fpr_s,
+        'tpr': tpr_s,
+        'recall': recall_s,
+        'precision': precision_s,
+        'prevalence': float(y_true.mean()),
+    }
 
 
-def calc_rank_metrics(score, label, n_pa_thresholds=1000):
+def save_roc_pr_curves(curve, save_dir, prefix='roc_pr', dataset=None):
+    """
+    Save ROC and PR curve images (point-adjusted).
+
+    Writes:
+      ``{save_dir}/{prefix}_roc.png``
+      ``{save_dir}/{prefix}_pr.png``
+      ``{save_dir}/{prefix}_combined.png``
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    title_ds = f' ({dataset})' if dataset else ''
+    auroc = curve['auroc']
+    auprc = curve['auprc']
+    prevalence = curve.get('prevalence', 0.0)
+
+    paths = {}
+
+    # ROC
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.plot(curve['fpr'], curve['tpr'], color='#1f77b4', lw=2,
+            label=f'ROC (AUROC={auroc:.4f})')
+    ax.plot([0, 1], [0, 1], 'k--', lw=1, label='random')
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.02)
+    ax.set_xlabel('False Positive Rate')
+    ax.set_ylabel('True Positive Rate')
+    ax.set_title(f'ROC curve — point adjustment{title_ds}')
+    ax.legend(loc='lower right')
+    ax.grid(True, alpha=0.3)
+    roc_path = os.path.join(save_dir, f'{prefix}_roc.png')
+    fig.tight_layout()
+    fig.savefig(roc_path, dpi=150)
+    plt.close(fig)
+    paths['roc_curve'] = roc_path
+
+    # PR
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.plot(curve['recall'], curve['precision'], color='#d62728', lw=2,
+            label=f'PR (AUPRC={auprc:.4f})')
+    ax.axhline(prevalence, color='k', ls='--', lw=1,
+               label=f'prevalence={prevalence:.4f}')
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.02)
+    ax.set_xlabel('Recall')
+    ax.set_ylabel('Precision')
+    ax.set_title(f'PR curve — point adjustment{title_ds}')
+    ax.legend(loc='lower left')
+    ax.grid(True, alpha=0.3)
+    pr_path = os.path.join(save_dir, f'{prefix}_pr.png')
+    fig.tight_layout()
+    fig.savefig(pr_path, dpi=150)
+    plt.close(fig)
+    paths['pr_curve'] = pr_path
+
+    # Combined
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    axes[0].plot(curve['fpr'], curve['tpr'], color='#1f77b4', lw=2,
+                 label=f'AUROC={auroc:.4f}')
+    axes[0].plot([0, 1], [0, 1], 'k--', lw=1)
+    axes[0].set_xlim(0, 1)
+    axes[0].set_ylim(0, 1.02)
+    axes[0].set_xlabel('False Positive Rate')
+    axes[0].set_ylabel('True Positive Rate')
+    axes[0].set_title(f'ROC — PA{title_ds}')
+    axes[0].legend(loc='lower right')
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(curve['recall'], curve['precision'], color='#d62728', lw=2,
+                 label=f'AUPRC={auprc:.4f}')
+    axes[1].axhline(prevalence, color='k', ls='--', lw=1,
+                    label=f'prevalence={prevalence:.4f}')
+    axes[1].set_xlim(0, 1)
+    axes[1].set_ylim(0, 1.02)
+    axes[1].set_xlabel('Recall')
+    axes[1].set_ylabel('Precision')
+    axes[1].set_title(f'PR — PA{title_ds}')
+    axes[1].legend(loc='lower left')
+    axes[1].grid(True, alpha=0.3)
+
+    combined_path = os.path.join(save_dir, f'{prefix}_combined.png')
+    fig.tight_layout()
+    fig.savefig(combined_path, dpi=150)
+    plt.close(fig)
+    paths['roc_pr_combined'] = combined_path
+
+    print(f'ROC curve saved to {roc_path}')
+    print(f'PR curve saved to {pr_path}')
+    print(f'Combined curves saved to {combined_path}')
+    return paths
+
+
+def calc_rank_metrics(score, label, n_pa_thresholds=1000,
+                      save_dir=None, dataset=None, prefix='roc_pr'):
     """
     AUROC / AUPRC with point adjustment at each threshold.
 
     Matches F1 / POT evaluation: ``adjust_predicts`` is applied whenever
-    converting scores to binary predictions.
+    converting scores to binary predictions.  If ``save_dir`` is set, ROC/PR
+    curve images are written there.
     """
     score, y_true = _prepare_rank_inputs(score, label)
     if len(np.unique(y_true)) < 2:
         nan = float('nan')
         return {'auroc': nan, 'auprc': nan, 'point_adjustment': True}
 
-    auroc, auprc = _calc_pa_curves(score, label, n_thresholds=n_pa_thresholds)
-    return {
-        'auroc': float(auroc),
-        'auprc': float(auprc),
+    curve = _calc_pa_curves(score, label, n_thresholds=n_pa_thresholds)
+    out = {
+        'auroc': float(curve['auroc']),
+        'auprc': float(curve['auprc']),
         'point_adjustment': True,
     }
+    if save_dir is not None:
+        paths = save_roc_pr_curves(
+            curve, save_dir, prefix=prefix, dataset=dataset,
+        )
+        out.update(paths)
+    return out
 
 
 def calc_point2point(predict, actual):

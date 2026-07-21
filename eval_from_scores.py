@@ -75,7 +75,11 @@ def run_eval(args, log):
         train_score, test_score, y_test,
         q=args.pot_q, level=level,
     )
-    rank_metrics = calc_rank_metrics(test_score, y_test)
+    rank_metrics = calc_rank_metrics(
+        test_score, y_test,
+        save_dir=args.result_dir,
+        dataset=args.dataset,
+    )
 
     metrics = {
         'best-f1': t[0],

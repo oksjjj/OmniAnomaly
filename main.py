@@ -211,6 +211,12 @@ def print_metrics_summary(metrics):
         print('-' * 60)
         print(f'  AUROC       {_fmt(metrics.get("auroc"))}')
         print(f'  AUPRC       {_fmt(metrics.get("auprc"))}')
+        if metrics.get('roc_curve'):
+            print(f'  ROC image   {metrics["roc_curve"]}')
+        if metrics.get('pr_curve'):
+            print(f'  PR image    {metrics["pr_curve"]}')
+        if metrics.get('roc_pr_combined'):
+            print(f'  Combined    {metrics["roc_pr_combined"]}')
 
     print()
     print('[Training]')
@@ -345,6 +351,8 @@ def run_experiment(config, device, log):
             )
             rank_metrics = calc_rank_metrics(
                 test_score, y_test[-len(test_score):],
+                save_dir=config.result_dir,
+                dataset=config.dataset,
             )
             best_valid_metrics.update({
                 'best-f1': t[0],
