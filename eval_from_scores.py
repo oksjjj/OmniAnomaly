@@ -13,7 +13,7 @@ import pickle
 import numpy as np
 
 from main import print_metrics_summary
-from omni_anomaly.eval_methods import pot_eval, bf_search
+from omni_anomaly.eval_methods import bf_search, calc_rank_metrics, pot_eval
 from omni_anomaly.train_logger import experiment_logging
 from omni_anomaly.utils import default_pot_level, get_data
 
@@ -75,6 +75,7 @@ def run_eval(args, log):
         train_score, test_score, y_test,
         q=args.pot_q, level=level,
     )
+    rank_metrics = calc_rank_metrics(test_score, y_test)
 
     metrics = {
         'best-f1': t[0],
@@ -86,6 +87,7 @@ def run_eval(args, log):
         'FN': t[6],
         'latency': t[-1],
         'threshold': th,
+        'point_adjustment': True,
         'dataset': args.dataset,
         'pot_q': args.pot_q,
         'level': level,
@@ -94,6 +96,7 @@ def run_eval(args, log):
         'test_score': test_path,
     }
     metrics.update(pot_result)
+    metrics.update(rank_metrics)
 
     out_path = os.path.join(args.result_dir, 'metrics_reeval.json')
     with open(out_path, 'w') as f:

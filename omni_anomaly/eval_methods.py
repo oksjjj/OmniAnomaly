@@ -1,7 +1,70 @@
 # -*- coding: utf-8 -*-
 import numpy as np
+from sklearn.metrics import auc
 
 from omni_anomaly.spot import SPOT
+
+
+def _prepare_rank_inputs(score, label):
+    y_true = np.asarray(label).reshape(-1).astype(bool)
+    score = np.asarray(score, dtype=float)
+    if score.ndim > 1:
+        score = score.sum(axis=-1)
+    score = score.reshape(-1)
+    if len(y_true) != len(score):
+        raise ValueError('score and label must have the same length')
+    return score, y_true
+
+
+def _calc_pa_curves(score, label, n_thresholds=1000):
+    """Build ROC / PR curves with point adjustment at each threshold."""
+    score, y_true = _prepare_rank_inputs(score, label)
+    thresholds = np.linspace(score.min() - 1e-6, score.max() + 1e-6, n_thresholds)
+
+    precisions = []
+    recalls = []
+    fprs = []
+    tprs = []
+
+    for th in thresholds:
+        pred = (score < th).copy()
+        pred_adj = adjust_predicts(score, label, pred=pred)
+
+        tp = int(np.sum(pred_adj & y_true))
+        fp = int(np.sum(pred_adj & ~y_true))
+        fn = int(np.sum(~pred_adj & y_true))
+        tn = int(np.sum(~pred_adj & ~y_true))
+
+        precisions.append(tp / (tp + fp + 1e-8))
+        recalls.append(tp / (tp + fn + 1e-8))
+        fprs.append(fp / (fp + tn + 1e-8))
+        tprs.append(tp / (tp + fn + 1e-8))
+
+    order_pr = np.argsort(recalls)
+    order_roc = np.argsort(fprs)
+    auprc = auc(np.array(recalls)[order_pr], np.array(precisions)[order_pr])
+    auroc = auc(np.array(fprs)[order_roc], np.array(tprs)[order_roc])
+    return auroc, auprc
+
+
+def calc_rank_metrics(score, label, n_pa_thresholds=1000):
+    """
+    AUROC / AUPRC with point adjustment at each threshold.
+
+    Matches F1 / POT evaluation: ``adjust_predicts`` is applied whenever
+    converting scores to binary predictions.
+    """
+    score, y_true = _prepare_rank_inputs(score, label)
+    if len(np.unique(y_true)) < 2:
+        nan = float('nan')
+        return {'auroc': nan, 'auprc': nan, 'point_adjustment': True}
+
+    auroc, auprc = _calc_pa_curves(score, label, n_thresholds=n_pa_thresholds)
+    return {
+        'auroc': float(auroc),
+        'auprc': float(auprc),
+        'point_adjustment': True,
+    }
 
 
 def calc_point2point(predict, actual):
@@ -164,4 +227,5 @@ def pot_eval(init_score, score, label, q=1e-4, level=0.02):
         'pot-latency': p_latency,
         'pot-q': q,
         'pot-level': level,
+        'point_adjustment': True,
     }

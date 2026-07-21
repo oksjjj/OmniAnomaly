@@ -16,7 +16,7 @@ import torch
 
 from omni_anomaly.checkpoint import load_checkpoint
 from omni_anomaly.device import get_device
-from omni_anomaly.eval_methods import pot_eval, bf_search
+from omni_anomaly.eval_methods import bf_search, calc_rank_metrics, pot_eval
 from omni_anomaly.model import OmniAnomaly
 from omni_anomaly.prediction import Predictor
 from omni_anomaly.train_logger import experiment_logging
@@ -165,20 +165,22 @@ def print_metrics_summary(metrics):
     """
     Print evaluation results in a readable layout.
 
-    POT is the primary metric (threshold from train scores only).
-    best-F1 is an oracle upper bound (threshold chosen on test labels).
+    All classification metrics use point adjustment (PA), consistent with
+    the official OmniAnomaly evaluation protocol.
     """
     has_pot = 'pot-f1' in metrics
     has_bf = 'best-f1' in metrics
+    pa_note = '포인트 보정 후'
 
     print()
     print('=' * 60)
     print(' EVALUATION SUMMARY')
+    print(f' ({pa_note} — all classification metrics)')
     print('=' * 60)
 
     if has_pot:
         print()
-        print('[POT]  <-- primary metric (no test-label peeking)')
+        print(f'[POT]  {pa_note} | primary (threshold from train scores only)')
         print('-' * 60)
         print(f'  F1          {_fmt(metrics.get("pot-f1"))}')
         print(f'  Precision   {_fmt(metrics.get("pot-precision"))}')
@@ -193,7 +195,7 @@ def print_metrics_summary(metrics):
 
     if has_bf:
         print()
-        print('[best-F1]  <-- oracle upper bound (threshold fit on test labels)')
+        print(f'[best-F1]  {pa_note} | oracle (threshold fit on test labels)')
         print('-' * 60)
         print(f'  F1          {_fmt(metrics.get("best-f1"))}')
         print(f'  Precision   {_fmt(metrics.get("precision"))}')
@@ -202,6 +204,13 @@ def print_metrics_summary(metrics):
         print(f'  TN / FN     {_fmt(metrics.get("TN"), 0)} / {_fmt(metrics.get("FN"), 0)}')
         print(f'  Threshold   {_fmt(metrics.get("threshold"), 6)}')
         print(f'  Latency     {_fmt(metrics.get("latency"))}')
+
+    if 'auroc' in metrics or 'auprc' in metrics:
+        print()
+        print(f'[Ranking]  {pa_note} | AUROC / AUPRC (PA at each threshold)')
+        print('-' * 60)
+        print(f'  AUROC       {_fmt(metrics.get("auroc"))}')
+        print(f'  AUPRC       {_fmt(metrics.get("auprc"))}')
 
     print()
     print('[Training]')
@@ -334,6 +343,9 @@ def run_experiment(config, device, log):
                 q=config.pot_q,
                 level=config.level,
             )
+            rank_metrics = calc_rank_metrics(
+                test_score, y_test[-len(test_score):],
+            )
             best_valid_metrics.update({
                 'best-f1': t[0],
                 'precision': t[1],
@@ -344,8 +356,10 @@ def run_experiment(config, device, log):
                 'FN': t[6],
                 'latency': t[-1],
                 'threshold': th,
+                'point_adjustment': True,
             })
             best_valid_metrics.update(pot_result)
+            best_valid_metrics.update(rank_metrics)
 
     # final save (official always saves after training)
     if config.save_dir is not None:
