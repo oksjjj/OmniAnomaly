@@ -28,7 +28,7 @@ class ExpConfig:
     """Experiment configuration (defaults match the official ExpConfig)."""
 
     # dataset configuration
-    dataset = "machine-1-1"
+    dataset = "SMAP"
     x_dim = 38
 
     # model architecture configuration

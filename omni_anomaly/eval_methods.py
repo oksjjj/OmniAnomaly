@@ -5,7 +5,14 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.metrics import auc
+from sklearn.metrics import (
+    PrecisionRecallDisplay,
+    RocCurveDisplay,
+    average_precision_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
 
 from omni_anomaly.spot import SPOT
 
@@ -21,52 +28,58 @@ def _prepare_rank_inputs(score, label):
     return score, y_true
 
 
-def _calc_pa_curves(score, label, n_thresholds=1000):
+def _anomaly_segment_bounds(y_true):
+    """Return (starts, ends) half-open index ranges for contiguous anomaly segments."""
+    actual = np.asarray(y_true, dtype=bool).reshape(-1)
+    padded = np.concatenate([[False], actual, [False]])
+    starts = np.flatnonzero(~padded[:-1] & padded[1:])
+    ends = np.flatnonzero(padded[:-1] & ~padded[1:])
+    return starts, ends
+
+
+def _point_adjusted_scores(score, starts, ends):
     """
-    Build ROC / PR curves with point adjustment at each threshold.
+    Convert raw scores to point-adjustment-equivalent scores.
+
+    Under point adjustment (PA), an anomaly segment is detected whenever *any*
+    point inside it crosses the threshold. Since a lower score means "more
+    anomalous", that is equivalent to giving every point in the segment the
+    segment's minimum score (its most anomalous point). Normal points keep
+    their own score. Feeding these adjusted scores to standard sklearn ranking
+    functions reproduces the PA confusion matrix at every threshold exactly.
+    """
+    adj = np.asarray(score, dtype=float).copy()
+    for a, b in zip(starts, ends):
+        adj[a:b] = adj[a:b].min()
+    return adj
+
+
+def _calc_pa_curves(score, y_true):
+    """
+    ROC / PR curves and AUC scores with point adjustment, via scikit-learn.
+
+    ``score`` / ``y_true`` must already be prepared by ``_prepare_rank_inputs``.
+    Lower score = more anomalous, so sklearn is fed ``-adjusted_score``.
 
     Returns:
-        dict with auroc, auprc, and sorted curve arrays (fpr/tpr, recall/precision).
+        dict with auroc, auprc, and sklearn curve arrays.
     """
-    score, y_true = _prepare_rank_inputs(score, label)
-    thresholds = np.linspace(score.min() - 1e-6, score.max() + 1e-6, n_thresholds)
+    starts, ends = _anomaly_segment_bounds(y_true)
+    y_score = -_point_adjusted_scores(score, starts, ends)
 
-    precisions = []
-    recalls = []
-    fprs = []
-    tprs = []
+    auroc = float(roc_auc_score(y_true, y_score))
+    auprc = float(average_precision_score(y_true, y_score))
 
-    for th in thresholds:
-        pred = (score < th).copy()
-        pred_adj = adjust_predicts(score, label, pred=pred)
-
-        tp = int(np.sum(pred_adj & y_true))
-        fp = int(np.sum(pred_adj & ~y_true))
-        fn = int(np.sum(~pred_adj & y_true))
-        tn = int(np.sum(~pred_adj & ~y_true))
-
-        precisions.append(tp / (tp + fp + 1e-8))
-        recalls.append(tp / (tp + fn + 1e-8))
-        fprs.append(fp / (fp + tn + 1e-8))
-        tprs.append(tp / (tp + fn + 1e-8))
-
-    fpr = np.asarray(fprs, dtype=float)
-    tpr = np.asarray(tprs, dtype=float)
-    precision = np.asarray(precisions, dtype=float)
-    recall = np.asarray(recalls, dtype=float)
-
-    order_roc = np.argsort(fpr)
-    order_pr = np.argsort(recall)
-    fpr_s, tpr_s = fpr[order_roc], tpr[order_roc]
-    recall_s, precision_s = recall[order_pr], precision[order_pr]
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+    precision, recall, _ = precision_recall_curve(y_true, y_score)
 
     return {
-        'auroc': float(auc(fpr_s, tpr_s)),
-        'auprc': float(auc(recall_s, precision_s)),
-        'fpr': fpr_s,
-        'tpr': tpr_s,
-        'recall': recall_s,
-        'precision': precision_s,
+        'auroc': auroc,
+        'auprc': auprc,
+        'fpr': fpr,
+        'tpr': tpr,
+        'recall': recall,
+        'precision': precision,
         'prevalence': float(y_true.mean()),
     }
 
@@ -88,15 +101,14 @@ def save_roc_pr_curves(curve, save_dir, prefix='roc_pr', dataset=None):
 
     paths = {}
 
-    # ROC
+    # ROC (sklearn RocCurveDisplay)
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(curve['fpr'], curve['tpr'], color='#1f77b4', lw=2,
-            label=f'ROC (AUROC={auroc:.4f})')
-    ax.plot([0, 1], [0, 1], 'k--', lw=1, label='random')
+    RocCurveDisplay(
+        fpr=curve['fpr'], tpr=curve['tpr'], roc_auc=auroc,
+    ).plot(ax=ax, name='OmniAnomaly (PA)', plot_chance_level=True,
+           curve_kwargs={'color': '#1f77b4', 'lw': 2})
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1.02)
-    ax.set_xlabel('False Positive Rate')
-    ax.set_ylabel('True Positive Rate')
     ax.set_title(f'ROC curve — point adjustment{title_ds}')
     ax.legend(loc='lower right')
     ax.grid(True, alpha=0.3)
@@ -106,16 +118,17 @@ def save_roc_pr_curves(curve, save_dir, prefix='roc_pr', dataset=None):
     plt.close(fig)
     paths['roc_curve'] = roc_path
 
-    # PR
+    # PR (sklearn PrecisionRecallDisplay)
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(curve['recall'], curve['precision'], color='#d62728', lw=2,
-            label=f'PR (AUPRC={auprc:.4f})')
+    PrecisionRecallDisplay(
+        precision=curve['precision'], recall=curve['recall'],
+        average_precision=auprc,
+    ).plot(ax=ax, name='OmniAnomaly (PA)',
+           curve_kwargs={'color': '#d62728', 'lw': 2})
     ax.axhline(prevalence, color='k', ls='--', lw=1,
                label=f'prevalence={prevalence:.4f}')
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1.02)
-    ax.set_xlabel('Recall')
-    ax.set_ylabel('Precision')
     ax.set_title(f'PR curve — point adjustment{title_ds}')
     ax.legend(loc='lower left')
     ax.grid(True, alpha=0.3)
@@ -127,25 +140,24 @@ def save_roc_pr_curves(curve, save_dir, prefix='roc_pr', dataset=None):
 
     # Combined
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    axes[0].plot(curve['fpr'], curve['tpr'], color='#1f77b4', lw=2,
-                 label=f'AUROC={auroc:.4f}')
-    axes[0].plot([0, 1], [0, 1], 'k--', lw=1)
+    RocCurveDisplay(
+        fpr=curve['fpr'], tpr=curve['tpr'], roc_auc=auroc,
+    ).plot(ax=axes[0], name='PA', plot_chance_level=True,
+           curve_kwargs={'color': '#1f77b4', 'lw': 2})
     axes[0].set_xlim(0, 1)
     axes[0].set_ylim(0, 1.02)
-    axes[0].set_xlabel('False Positive Rate')
-    axes[0].set_ylabel('True Positive Rate')
     axes[0].set_title(f'ROC — PA{title_ds}')
-    axes[0].legend(loc='lower right')
     axes[0].grid(True, alpha=0.3)
 
-    axes[1].plot(curve['recall'], curve['precision'], color='#d62728', lw=2,
-                 label=f'AUPRC={auprc:.4f}')
+    PrecisionRecallDisplay(
+        precision=curve['precision'], recall=curve['recall'],
+        average_precision=auprc,
+    ).plot(ax=axes[1], name='PA',
+           curve_kwargs={'color': '#d62728', 'lw': 2})
     axes[1].axhline(prevalence, color='k', ls='--', lw=1,
                     label=f'prevalence={prevalence:.4f}')
     axes[1].set_xlim(0, 1)
     axes[1].set_ylim(0, 1.02)
-    axes[1].set_xlabel('Recall')
-    axes[1].set_ylabel('Precision')
     axes[1].set_title(f'PR — PA{title_ds}')
     axes[1].legend(loc='lower left')
     axes[1].grid(True, alpha=0.3)
@@ -162,21 +174,24 @@ def save_roc_pr_curves(curve, save_dir, prefix='roc_pr', dataset=None):
     return paths
 
 
-def calc_rank_metrics(score, label, n_pa_thresholds=1000,
-                      save_dir=None, dataset=None, prefix='roc_pr'):
+def calc_rank_metrics(score, label, save_dir=None, dataset=None,
+                      prefix='roc_pr'):
     """
-    AUROC / AUPRC with point adjustment at each threshold.
+    AUROC / AUPRC with point adjustment, computed via scikit-learn.
 
-    Matches F1 / POT evaluation: ``adjust_predicts`` is applied whenever
-    converting scores to binary predictions.  If ``save_dir`` is set, ROC/PR
-    curve images are written there.
+    Point adjustment is applied by mapping each anomaly segment to its most
+    anomalous (minimum) score, which makes standard sklearn ranking functions
+    (``roc_auc_score``, ``average_precision_score``, ``roc_curve``,
+    ``precision_recall_curve``) reproduce the PA confusion matrix exactly.
+    AUPRC is sklearn's Average Precision. If ``save_dir`` is set, ROC/PR curve
+    images are written there.
     """
     score, y_true = _prepare_rank_inputs(score, label)
     if len(np.unique(y_true)) < 2:
         nan = float('nan')
         return {'auroc': nan, 'auprc': nan, 'point_adjustment': True}
 
-    curve = _calc_pa_curves(score, label, n_thresholds=n_pa_thresholds)
+    curve = _calc_pa_curves(score, y_true)
     out = {
         'auroc': float(curve['auroc']),
         'auprc': float(curve['auprc']),
@@ -316,22 +331,17 @@ def pot_eval(init_score, score, label, q=1e-4, level=0.02):
             (SMAP 0.07, MSL 0.01, SMD subset-specific).
 
     Notes:
-        ``SPOT.run(dynamic=False)`` overwrites ``extreme_quantile`` with
-        ``init_threshold`` after the first exceedance.  We therefore take the
-        GPD-fitted extreme quantile from ``initialize()`` as ``pot_th``,
-        matching the intended POT procedure (paper / standard SPOT).
+        Only ``SPOT.initialize()`` is used to obtain the GPD extreme quantile.
+        ``SPOT.run()`` is intentionally skipped: with ``dynamic=False`` it
+        overwrites that quantile, and streaming alarms are unused because
+        predictions are made with a fixed threshold + point adjustment.
     """
     s = SPOT(q)
     s.fit(init_score, score)
     s.initialize(level=level, min_extrema=True)
 
-    # GPD extreme quantile computed in initialize (before run can overwrite it)
-    gpd_extreme_quantile = float(s.extreme_quantile)
-    pot_th = -gpd_extreme_quantile
-
-    ret = s.run(dynamic=False)
-    print(len(ret['alarms']))
-    print(len(ret['thresholds']))
+    # Negated-score SPOT → original score threshold
+    pot_th = -float(s.extreme_quantile)
     print('POT threshold (GPD extreme quantile):', pot_th,
           '(init_threshold on negated scores:', float(s.init_threshold), ')')
 
