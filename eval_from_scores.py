@@ -4,6 +4,7 @@ Re-evaluate POT / best-F1 from saved score pickles (no re-training / re-scoring)
 
 Example:
     python eval_from_scores.py --dataset SMAP
+    python eval_from_scores.py --dataset SMAP --exclude_prior
 """
 import argparse
 import json
@@ -15,13 +16,44 @@ import numpy as np
 from main import print_metrics_summary
 from omni_anomaly.eval_methods import bf_search, calc_rank_metrics, pot_eval
 from omni_anomaly.train_logger import experiment_logging
-from omni_anomaly.utils import default_pot_level, get_data
+from omni_anomaly.utils import default_pot_level, get_data, resolve_output_dirs
+
+
+class _PathConfig:
+    """Minimal config object for resolve_output_dirs."""
+
+    def __init__(self, args):
+        self.dataset = args.dataset
+        self.save_dir = args.save_dir
+        self.result_dir = args.result_dir
+        self.log_dir = args.log_dir
+        self.include_prior_in_loss = not args.exclude_prior
+        self.early_stop = args.early_stop
+        self.posterior_flow_type = (
+            None if args.posterior_flow_type in ('none', 'null', None)
+            else args.posterior_flow_type
+        )
+        self.use_connected_z_p = not args.no_connected_z_p
+        self.use_connected_z_q = not args.no_connected_z_q
+        self.experiment_name = None
 
 
 def parse_args():
     p = argparse.ArgumentParser(description='Re-evaluate from saved scores')
     p.add_argument('--dataset', type=str, required=True)
+    p.add_argument('--save_dir', type=str, default='model')
     p.add_argument('--result_dir', type=str, default='result')
+    p.add_argument('--log_dir', type=str, default='log')
+    p.add_argument('--run_name', type=str, default=None,
+                   help='Override auto experiment folder name')
+    p.add_argument('--exclude_prior', action='store_true',
+                   help='Match noprior run paths (default: prior included)')
+    p.add_argument('--early_stop', action='store_true',
+                   help='Match experiment that used early stopping (default: noes)')
+    p.add_argument('--posterior_flow_type', type=str, default='nf',
+                   help="'nf' or 'none' (for path resolution)")
+    p.add_argument('--no_connected_z_p', action='store_true')
+    p.add_argument('--no_connected_z_q', action='store_true')
     p.add_argument('--train_score', type=str, default='train_score.pkl')
     p.add_argument('--test_score', type=str, default='test_score.pkl')
     p.add_argument('--level', type=float, default=None,
@@ -32,14 +64,13 @@ def parse_args():
     p.add_argument('--bf_search_max', type=float, default=400.)
     p.add_argument('--bf_search_step_size', type=float, default=1.)
     p.add_argument('--get_score_on_dim', action='store_true')
-    p.add_argument('--log_dir', type=str, default='log')
     return p.parse_args()
 
 
-def run_eval(args, log):
+def run_eval(args, result_dir, log):
     level = args.level if args.level is not None else default_pot_level(args.dataset)
-    train_path = os.path.join(args.result_dir, args.train_score)
-    test_path = os.path.join(args.result_dir, args.test_score)
+    train_path = os.path.join(result_dir, args.train_score)
+    test_path = os.path.join(result_dir, args.test_score)
 
     with open(train_path, 'rb') as f:
         train_score = pickle.load(f)
@@ -77,7 +108,7 @@ def run_eval(args, log):
     )
     rank_metrics = calc_rank_metrics(
         test_score, y_test,
-        save_dir=args.result_dir,
+        save_dir=result_dir,
         dataset=args.dataset,
     )
 
@@ -102,7 +133,7 @@ def run_eval(args, log):
     metrics.update(pot_result)
     metrics.update(rank_metrics)
 
-    out_path = os.path.join(args.result_dir, 'metrics_reeval.json')
+    out_path = os.path.join(result_dir, 'metrics_reeval.json')
     with open(out_path, 'w') as f:
         json.dump(metrics, f, indent=2, default=str)
     print(f'Metrics saved to {out_path}')
@@ -113,10 +144,21 @@ def run_eval(args, log):
 
 def main():
     args = parse_args()
-    with experiment_logging(args.log_dir, args.dataset, mode='eval') as (log_path, log):
+    cfg = _PathConfig(args)
+    if args.posterior_flow_type is not None:
+        pft = args.posterior_flow_type
+        cfg.posterior_flow_type = None if pft.lower() in ('none', 'null') else pft
+    exp = resolve_output_dirs(cfg, run_name=args.run_name)
+
+    print(f'experiment_name={exp}')
+    print(f'result_dir={cfg.result_dir}')
+    print(f'log_dir={cfg.log_dir}')
+
+    with experiment_logging(cfg.log_dir, args.dataset, mode='eval') as (log_path, log):
         print(f'Log file: {log_path}')
         log.info('Score re-evaluation started')
-        run_eval(args, log)
+        log.info('experiment_name=%s result_dir=%s', exp, cfg.result_dir)
+        run_eval(args, cfg.result_dir, log)
 
 
 if __name__ == '__main__':

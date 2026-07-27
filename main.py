@@ -21,7 +21,13 @@ from omni_anomaly.model import OmniAnomaly
 from omni_anomaly.prediction import Predictor
 from omni_anomaly.train_logger import experiment_logging
 from omni_anomaly.training import Trainer
-from omni_anomaly.utils import default_pot_level, get_data_dim, get_data, save_z
+from omni_anomaly.utils import (
+    default_pot_level,
+    get_data,
+    get_data_dim,
+    resolve_output_dirs,
+    save_z,
+)
 
 
 class ExpConfig:
@@ -34,6 +40,8 @@ class ExpConfig:
     # model architecture configuration
     use_connected_z_q = True
     use_connected_z_p = True
+    # True: ELBO with log p(z); False: official TF loss (reconstruction only)
+    include_prior_in_loss = True
 
     # model parameters
     z_dim = 3
@@ -43,7 +51,7 @@ class ExpConfig:
     dense_dim = 500
     posterior_flow_type = 'nf'  # 'nf' or None
     nf_layers = 20
-    max_epoch = 20  # paper: run for 20 epochs with early stopping
+    max_epoch = 20  # paper: 20 epochs; best valid weights restored at end
     train_start = 0
     max_train_size = None
     batch_size = 50
@@ -66,8 +74,11 @@ class ExpConfig:
 
     valid_step_freq = 100
     gradient_clip_norm = 10.
+    # 'per_tensor': paper/TF-style clip_by_norm per gradient tensor
+    # 'global': clip the whole-model grad norm (more stable late training)
+    grad_clip_mode = 'per_tensor'
 
-    early_stop = True
+    early_stop = False             # train full max_epoch; restore best valid weights
     early_stop_patience = 30       # consecutive valid checks without improvement
     early_stop_min_epochs = 3      # do not stop before this many epochs
     early_stop_warmup_steps = 300  # ignore patience counting during warmup
@@ -80,6 +91,7 @@ class ExpConfig:
     pot_q = 1e-4
 
     # outputs config
+    # Actual paths are resolved to {root}/{dataset}/{experiment_name}/
     save_z = False
     get_score_on_dim = False
     save_dir = 'model'
@@ -87,6 +99,8 @@ class ExpConfig:
     result_dir = 'result'
     train_score_filename = 'train_score.pkl'
     test_score_filename = 'test_score.pkl'
+    experiment_name = None  # set by resolve_output_dirs
+    run_name = None         # optional override for experiment_name
 
     # PyTorch-only
     log_dir = 'log'
@@ -113,7 +127,22 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default=None)
     parser.add_argument('--max_epoch', type=int, default=None)
     parser.add_argument('--batch_size', type=int, default=None)
-    parser.add_argument('--initial_lr', type=float, default=None)
+    parser.add_argument('--initial_lr', type=float, default=None,
+                        help='Adam learning rate (paper default: 1e-3)')
+    parser.add_argument('--std_epsilon', type=float, default=None,
+                        help='Floor added to softplus std (paper default: 1e-4). '
+                             'Try 1e-3 to reduce decoder variance collapse.')
+    parser.add_argument('--gradient_clip_norm', type=float, default=None,
+                        help='Grad clip max-norm (paper default: 10)')
+    parser.add_argument('--grad_clip_mode', type=str, default=None,
+                        choices=('per_tensor', 'global'),
+                        help="'per_tensor' = paper/TF (default); "
+                             "'global' = clip whole-model grad norm")
+    parser.add_argument('--stable_train', action='store_true',
+                        help='Convenience preset: std_epsilon=1e-3, '
+                             'initial_lr=5e-4, grad_clip_mode=global, '
+                             'gradient_clip_norm=5 (does not override '
+                             'explicit flags)')
     parser.add_argument('--z_dim', type=int, default=None)
     parser.add_argument('--window_length', type=int, default=None)
     parser.add_argument('--level', type=float, default=None,
@@ -128,8 +157,9 @@ def parse_args():
     parser.add_argument('--device', type=str, default=None,
                         help='mps / cuda / cpu (default: auto)')
     parser.add_argument('--valid_step_freq', type=int, default=None)
-    parser.add_argument('--no_early_stop', action='store_true',
-                        help='Disable patience-based early stopping')
+    parser.add_argument('--early_stop', action='store_true',
+                        help='Enable patience-based early stopping '
+                             '(default: run all max_epoch, then restore best)')
     parser.add_argument('--early_stop_patience', type=int, default=None,
                         help='Valid checks without improvement before stop')
     parser.add_argument('--early_stop_min_epochs', type=int, default=None)
@@ -138,12 +168,18 @@ def parse_args():
                         help="'nf' or 'none'")
     parser.add_argument('--no_tensorboard', action='store_true',
                         help='Disable TensorBoard logging')
+    parser.add_argument('--exclude_prior', action='store_true',
+                        help='Omit log p(z) from SGVB loss '
+                             '(official TF ablation; default keeps prior)')
+    parser.add_argument('--run_name', type=str, default=None,
+                        help='Override auto experiment folder name '
+                             '(default: prior/noprior_es/noes_nf/...)')
     return parser.parse_args()
 
 
 def get_checkpoint_dir(config):
-    base = config.save_dir or 'model'
-    return os.path.join(base, config.dataset)
+    """Checkpoint directory (already ``model/{dataset}/{experiment_name}``)."""
+    return config.save_dir or 'model'
 
 
 def _fmt(value, digits=4):
@@ -247,6 +283,11 @@ def run_experiment(config, device, log):
     print(json.dumps(config.to_dict(), indent=2, default=str))
     print(f'Using device: {device}')
     print(f'POT level={config.level}, q={config.pot_q}')
+    print(f'include_prior_in_loss={config.include_prior_in_loss}')
+    print(f'experiment_name={config.experiment_name}')
+    print(f'save_dir={config.save_dir}')
+    print(f'result_dir={config.result_dir}')
+    print(f'log_dir={config.log_dir}')
 
     with open(os.path.join(config.result_dir, 'config.json'), 'w') as f:
         json.dump(config.to_dict(), f, indent=2, default=str)
@@ -273,6 +314,7 @@ def run_experiment(config, device, log):
         lr_anneal_epochs=config.lr_anneal_epoch_freq,
         lr_anneal_factor=config.lr_anneal_factor,
         grad_clip_norm=config.gradient_clip_norm,
+        grad_clip_mode=config.grad_clip_mode,
         valid_step_freq=config.valid_step_freq,
         early_stop=config.early_stop,
         patience=config.early_stop_patience,
@@ -389,12 +431,25 @@ def run_experiment(config, device, log):
 
 def main():
     args = parse_args()
+    # Optional stability preset; explicit CLI flags still win.
+    if getattr(args, 'stable_train', False):
+        if args.std_epsilon is None:
+            args.std_epsilon = 1e-3
+        if args.initial_lr is None:
+            args.initial_lr = 5e-4
+        if args.grad_clip_mode is None:
+            args.grad_clip_mode = 'global'
+        if args.gradient_clip_norm is None:
+            args.gradient_clip_norm = 5.0
+
     config = ExpConfig()
     config.update_from_args(args)
-    if args.no_early_stop:
-        config.early_stop = False
+    if args.early_stop:
+        config.early_stop = True
     if args.no_tensorboard:
         config.tensorboard = False
+    if args.exclude_prior:
+        config.include_prior_in_loss = False
     if args.posterior_flow_type is not None:
         pft = args.posterior_flow_type
         config.posterior_flow_type = None if pft.lower() in ('none', 'null') else pft
@@ -402,27 +457,41 @@ def main():
     if config.level is None:
         config.level = default_pot_level(config.dataset)
 
+    resolve_output_dirs(config, run_name=args.run_name)
+    # Eval-only: default restore to this experiment's checkpoint dir
+    if config.max_epoch == 0 and config.restore_dir is None:
+        config.restore_dir = get_checkpoint_dir(config)
+
     if config.device:
         device = torch.device(config.device)
     else:
         # auto: MPS (Apple Silicon) > CUDA > CPU
         device = get_device(prefer_mps=True)
 
-    log_dir = config.log_dir or 'log'
-    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(config.log_dir, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     )
 
     with experiment_logging(
-        log_dir, config.dataset,
+        config.log_dir, config.dataset,
         mode='eval' if config.max_epoch == 0 else 'train',
     ) as (log_path, log):
         print(f'Log file: {log_path}')
         log.info('Experiment started')
+        log.info('experiment_name=%s', config.experiment_name)
+        log.info('save_dir=%s result_dir=%s log_dir=%s',
+                 config.save_dir, config.result_dir, config.log_dir)
         log.info('Device: %s', device)
         log.info('POT level=%s (q=%s)', config.level, config.pot_q)
+        log.info('include_prior_in_loss=%s', config.include_prior_in_loss)
+        log.info(
+            'train knobs: lr=%s std_epsilon=%s grad_clip_mode=%s '
+            'gradient_clip_norm=%s',
+            config.initial_lr, config.std_epsilon,
+            config.grad_clip_mode, config.gradient_clip_norm,
+        )
         run_experiment(config, device, log)
 
 

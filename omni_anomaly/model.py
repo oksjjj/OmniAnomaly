@@ -66,6 +66,7 @@ class OmniAnomaly(nn.Module):
             h_for_q_z=h_for_q_z,
             use_connected_z_p=config.use_connected_z_p,
             use_connected_z_q=config.use_connected_z_q,
+            include_prior_in_loss=getattr(config, 'include_prior_in_loss', True),
         )
 
     @property

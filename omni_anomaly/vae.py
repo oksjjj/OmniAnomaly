@@ -21,6 +21,7 @@ class VAE(nn.Module):
         h_for_q_z,
         use_connected_z_p=True,
         use_connected_z_q=True,
+        include_prior_in_loss=True,
         z_group_ndims=1,
         x_group_ndims=1,
     ):
@@ -31,6 +32,7 @@ class VAE(nn.Module):
         self.window_length = config.window_length
         self.use_connected_z_p = use_connected_z_p
         self.use_connected_z_q = use_connected_z_q
+        self.include_prior_in_loss = include_prior_in_loss
         self.z_group_ndims = z_group_ndims
         self.x_group_ndims = x_group_ndims
 
@@ -129,13 +131,15 @@ class VAE(nn.Module):
 
     def get_training_loss(self, x, posterior_flow=None, n_z=None):
         """
-        SGVB training loss with GSSM prior connection:
+        SGVB training loss.
 
+        Default (``include_prior_in_loss=True``):
             log_joint = log p(x|z) + log p(z)
             loss = mean(log q(z|x) - log_joint)
 
-        Equivalent to minimizing -ELBO =
-            -E[log p(x|z) + log p(z) - log q(z|x)].
+        Official TF OmniAnomaly (``include_prior_in_loss=False``):
+            log_joint = log p(x|z)   # prior term omitted
+            loss = mean(log q(z|x) - log_joint)
         """
         q_out = self.variational(x, n_z=n_z, posterior_flow=posterior_flow)
         z = q_out['z']
@@ -143,8 +147,10 @@ class VAE(nn.Module):
 
         p_out = self.model_net(z, x=x, n_z=n_z)
         log_p_x = p_out['log_p_x']  # (batch, T)
-        log_p_z = p_out['log_p_z']  # (..., T) GSSM / independent prior
-        log_joint = log_p_x + log_p_z
+        if self.include_prior_in_loss:
+            log_joint = log_p_x + p_out['log_p_z']
+        else:
+            log_joint = log_p_x
 
         # SGVB: latent_log_prob - log_joint ; mean over sample dim then all elems
         sgvb = log_q - log_joint

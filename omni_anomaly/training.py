@@ -25,13 +25,22 @@ def _clip_grad_norm_per_tensor(parameters, max_norm):
             torch.nn.utils.clip_grad_norm_(p, max_norm)
 
 
+def _clip_grad_norm_global(parameters, max_norm):
+    """Clip the global (whole-model) gradient norm."""
+    torch.nn.utils.clip_grad_norm_(
+        [p for p in parameters if p.grad is not None],
+        max_norm,
+    )
+
+
 class Trainer:
     """
-    OmniAnomaly trainer with patience-based early stopping.
+    OmniAnomaly trainer.
 
-    When ``early_stop=True``, training stops if validation loss does not
-    improve for ``patience`` consecutive validation checks (after warmup /
-    min epochs), then restores the best weights.
+    Always tracks the best validation loss and restores those weights at
+    the end. When ``early_stop=True``, also stops early if validation loss
+    does not improve for ``patience`` consecutive checks (after warmup /
+    min epochs).
     """
 
     def __init__(
@@ -48,7 +57,8 @@ class Trainer:
         lr_anneal_epochs=10,
         lr_anneal_factor=0.75,
         grad_clip_norm=10.0,
-        early_stop=True,
+        grad_clip_mode='per_tensor',
+        early_stop=False,
         patience=30,
         early_stop_min_epochs=3,
         early_stop_warmup_steps=300,
@@ -62,6 +72,11 @@ class Trainer:
         if max_epoch is None and max_step is None:
             raise ValueError('At least one of `max_epoch` and `max_step` '
                              'should be specified')
+        if grad_clip_mode not in ('per_tensor', 'global'):
+            raise ValueError(
+                "grad_clip_mode must be 'per_tensor' or 'global', "
+                f"got {grad_clip_mode!r}"
+            )
 
         self.model = model
         self.device = device
@@ -75,6 +90,7 @@ class Trainer:
         self.lr_anneal_epochs = lr_anneal_epochs
         self.lr_anneal_factor = lr_anneal_factor
         self.grad_clip_norm = grad_clip_norm
+        self.grad_clip_mode = grad_clip_mode
         self.early_stop = early_stop
         self.patience = patience
         self.early_stop_min_epochs = early_stop_min_epochs
@@ -224,9 +240,14 @@ class Trainer:
                     loss.backward()
 
                     if self.grad_clip_norm:
-                        _clip_grad_norm_per_tensor(
-                            self.model.parameters(), self.grad_clip_norm,
-                        )
+                        if self.grad_clip_mode == 'global':
+                            _clip_grad_norm_global(
+                                self.model.parameters(), self.grad_clip_norm,
+                            )
+                        else:
+                            _clip_grad_norm_per_tensor(
+                                self.model.parameters(), self.grad_clip_norm,
+                            )
 
                     self.optimizer.step()
                     train_batch_times.append(time.time() - batch_start)

@@ -58,6 +58,81 @@ def default_pot_level(dataset):
     raise ValueError('unknown dataset ' + name)
 
 
+def _fmt_exp_float(value):
+    """Compact float tag for experiment folder names (e.g. 1e-3, 5e-4, 5)."""
+    v = float(value)
+    if v == 0:
+        return '0'
+    if abs(v) >= 1 and float(int(v)) == v:
+        return str(int(v))
+    s = f'{v:.0e}'.replace('+', '')
+    if 'e-' in s:
+        base, exp = s.split('e-')
+        s = f'{base}e-{int(exp)}'
+    elif 'e' in s:
+        base, exp = s.split('e')
+        s = f'{base}e{int(exp)}'
+    return s
+
+
+def build_experiment_name(config, run_name=None):
+    """
+    Stable slug from training settings so runs do not overwrite each other.
+
+    Example: ``prior_es_nf``, ``noprior_es_nf_lr5e-4_eps1e-3_gclip5``.
+    Non-paper training knobs are appended only when they differ from defaults.
+    """
+    if run_name:
+        return str(run_name)
+
+    prior = 'prior' if getattr(config, 'include_prior_in_loss', True) else 'noprior'
+    es = 'es' if getattr(config, 'early_stop', False) else 'noes'
+    pft = getattr(config, 'posterior_flow_type', 'nf')
+    flow = 'nf' if pft == 'nf' else 'nonf'
+    parts = [prior, es, flow]
+    if not getattr(config, 'use_connected_z_p', True):
+        parts.append('noz_p')
+    if not getattr(config, 'use_connected_z_q', True):
+        parts.append('noz_q')
+
+    # Paper defaults: lr=1e-3, std_epsilon=1e-4, per-tensor clip=10
+    lr = float(getattr(config, 'initial_lr', 1e-3))
+    if abs(lr - 1e-3) > 1e-15:
+        parts.append(f'lr{_fmt_exp_float(lr)}')
+    eps = float(getattr(config, 'std_epsilon', 1e-4))
+    if abs(eps - 1e-4) > 1e-15:
+        parts.append(f'eps{_fmt_exp_float(eps)}')
+    clip_mode = getattr(config, 'grad_clip_mode', 'per_tensor')
+    clip_norm = float(getattr(config, 'gradient_clip_norm', 10.0))
+    if clip_mode == 'global':
+        parts.append(f'gclip{_fmt_exp_float(clip_norm)}')
+    elif abs(clip_norm - 10.0) > 1e-15:
+        parts.append(f'pclip{_fmt_exp_float(clip_norm)}')
+    return '_'.join(parts)
+
+
+def resolve_output_dirs(config, run_name=None,
+                        save_root=None, result_root=None, log_root=None):
+    """
+    Nest outputs under ``{root}/{dataset}/{experiment_name}/``.
+
+    Roots default to the current ``save_dir`` / ``result_dir`` / ``log_dir``
+    (or ``model`` / ``result`` / ``log``). Explicit roots win when provided.
+    """
+    exp = build_experiment_name(config, run_name=run_name)
+    dataset = config.dataset
+    config.experiment_name = exp
+
+    save_root = save_root if save_root is not None else (config.save_dir or 'model')
+    result_root = result_root if result_root is not None else (config.result_dir or 'result')
+    log_root = log_root if log_root is not None else (config.log_dir or 'log')
+
+    config.save_dir = os.path.join(save_root, dataset, exp)
+    config.result_dir = os.path.join(result_root, dataset, exp)
+    config.log_dir = os.path.join(log_root, dataset, exp)
+    return exp
+
+
 def get_data(dataset, max_train_size=None, max_test_size=None, print_log=True,
              do_preprocess=True, train_start=0, test_start=0):
     """

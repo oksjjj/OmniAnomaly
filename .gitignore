@@ -140,3 +140,8 @@ log/**
 *.pt
 
 *.ipynb
+
+viz_gt/
+viz_pred/
+
+.DS_Store
