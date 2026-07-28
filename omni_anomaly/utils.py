@@ -5,7 +5,31 @@ import pickle
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 
-prefix = "processed"
+# Legacy flat layout (pre-THOC alignment). Prefer data/{SMAP,MSL,SMD}/.
+_LEGACY_PREFIX = 'processed'
+
+
+def data_dir_for(dataset):
+    """
+    Prepared-data directory for a dataset name (THOC-aligned).
+
+    ``SMAP`` / ``MSL`` → ``data/SMAP`` / ``data/MSL``
+    ``machine-*``     → ``data/SMD``
+    Falls back to ``processed/`` if the new layout is missing.
+    """
+    if dataset in ('SMAP', 'MSL'):
+        modern = os.path.join('data', dataset)
+    elif str(dataset).startswith('machine'):
+        modern = os.path.join('data', 'SMD')
+    else:
+        modern = _LEGACY_PREFIX
+
+    train_name = f'{dataset}_train.pkl'
+    if os.path.isfile(os.path.join(modern, train_name)):
+        return modern
+    if os.path.isfile(os.path.join(_LEGACY_PREFIX, train_name)):
+        return _LEGACY_PREFIX
+    return modern
 
 
 def save_z(z, filename='z'):
@@ -156,6 +180,7 @@ def get_data(dataset, max_train_size=None, max_test_size=None, print_log=True,
         print("test: ", test_start, test_end)
 
     x_dim = get_data_dim(dataset)
+    prefix = data_dir_for(dataset)
     with open(os.path.join(prefix, dataset + '_train.pkl'), "rb") as f:
         train_data = pickle.load(f).reshape((-1, x_dim))[train_start:train_end, :]
 

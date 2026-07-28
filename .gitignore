@@ -28,8 +28,6 @@ wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
@@ -116,31 +114,26 @@ _tfsnippet_repo/
 _tfsnippet_ref/
 _haowen_omni/
 
-# --- Datasets (download: download_smd.py / download_smap_msl.py) ---
-ServerMachineDataset/**
-!ServerMachineDataset/.gitkeep
+# --- Datasets (see data/README.md) ---
+data/*
+!data/README.md
 
-data/**
-!data/.gitkeep
-
-processed/**
-!processed/.gitkeep
-
-# Raw data file patterns
-ServerMachineDataset/**/*.txt
-data/**/*.npy
-data/labeled_anomalies.csv
+# Legacy prepared-data / raw dirs (if present)
+processed/
+ServerMachineDataset/
 
 # --- Experiment outputs ---
 model/
 result/
-log/**
-!log/.gitkeep
+log/
 *.pkl
 *.pt
+*.pth
+*.ckpt
 
 *.ipynb
 
+# Visualization outputs (THOC 동일)
 viz_gt/
 viz_pred/
 

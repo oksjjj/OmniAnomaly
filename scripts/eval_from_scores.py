@@ -3,15 +3,21 @@
 Re-evaluate POT / best-F1 from saved score pickles (no re-training / re-scoring).
 
 Example:
-    python eval_from_scores.py --dataset SMAP
-    python eval_from_scores.py --dataset SMAP --exclude_prior
+    python scripts/eval_from_scores.py --dataset SMAP
+    python scripts/eval_from_scores.py --dataset SMAP --exclude_prior
+    python scripts/eval_from_scores.py --dataset machine-1-1 --run_name noprior_noes_paper
 """
 import argparse
 import json
 import os
 import pickle
+import sys
 
 import numpy as np
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from main import print_metrics_summary
 from omni_anomaly.eval_methods import bf_search, calc_rank_metrics, pot_eval
@@ -144,6 +150,7 @@ def run_eval(args, result_dir, log):
 
 def main():
     args = parse_args()
+    os.chdir(_REPO_ROOT)
     cfg = _PathConfig(args)
     if args.posterior_flow_type is not None:
         pft = args.posterior_flow_type

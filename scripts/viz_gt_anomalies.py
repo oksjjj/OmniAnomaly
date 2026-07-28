@@ -14,9 +14,9 @@ Modes:
   FN : GT anomaly & not predicted  → blue open circles
 
 Examples:
-    python viz_gt_anomalies.py --dataset machine-1-1 --gt_only
-    python viz_gt_anomalies.py --dataset SMAP --gt_only
-    python viz_gt_anomalies.py --dataset SMAP --run_name prior_noes_nf_lr5e-4_eps1e-3_gclip5
+    python scripts/viz_gt_anomalies.py --dataset machine-1-1 --gt_only
+    python scripts/viz_gt_anomalies.py --dataset SMAP --gt_only
+    python scripts/viz_gt_anomalies.py --dataset SMAP --run_name prior_noes_nf_lr5e-4_eps1e-3_gclip5
 """
 from __future__ import annotations
 
@@ -24,9 +24,14 @@ import argparse
 import json
 import os
 import pickle
+import sys
 
 import matplotlib
 import numpy as np
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from omni_anomaly.utils import get_data, resolve_output_dirs
 
@@ -240,6 +245,7 @@ def plot_gt_segment(x, y, pred, start, end, index, n_total, context_mult,
 
 def main():
     args = parse_args()
+    os.chdir(_REPO_ROOT)
     out_root = args.out_dir or ('viz_gt' if args.gt_only else 'viz_pred')
 
     (_, _), (x_test, y_test) = get_data(args.dataset, do_preprocess=True)
