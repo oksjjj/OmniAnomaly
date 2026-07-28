@@ -3,16 +3,20 @@
 GT anomaly segment viewer (OmniAnomaly paper Fig.1 style).
 
 Saves every ground-truth anomaly segment as its own PNG, with normal
-context of 10× segment length on both sides. Overlay model predictions
-(no point adjustment) as red markers:
+context of 10× segment length on both sides.
+
+Modes:
+  --gt_only   : GT bands only (no model scores; use before training)
+  default     : overlay TP/FP/FN from saved test_score (no point adjustment)
 
   TP : GT anomaly & predicted      → red filled circles
   FP : normal & predicted          → red triangles
   FN : GT anomaly & not predicted  → blue open circles
 
 Examples:
-    python viz_gt_anomalies.py --dataset SMAP
-    python viz_gt_anomalies.py --dataset SMAP --exclude_prior
+    python viz_gt_anomalies.py --dataset machine-1-1 --gt_only
+    python viz_gt_anomalies.py --dataset SMAP --gt_only
+    python viz_gt_anomalies.py --dataset SMAP --run_name prior_noes_nf_lr5e-4_eps1e-3_gclip5
 """
 from __future__ import annotations
 
@@ -57,13 +61,15 @@ class _PathConfig:
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description='Save GT anomaly plots with TP/FP/FN prediction markers',
+        description='Save GT anomaly plots (optionally with TP/FP/FN markers)',
     )
     p.add_argument('--dataset', type=str, required=True)
+    p.add_argument('--gt_only', action='store_true',
+                   help='Plot GT segments only (no scores/metrics required)')
     p.add_argument('--context_mult', type=float, default=10.0,
                    help='Normal context length multiplier on each side (default: 10)')
-    p.add_argument('--out_dir', type=str, default='viz_pred',
-                   help='Output root (saves under {out_dir}/{dataset}/{exp}/)')
+    p.add_argument('--out_dir', type=str, default=None,
+                   help='Output root (default: viz_gt if --gt_only else viz_pred)')
     p.add_argument('--save_dir', type=str, default='model')
     p.add_argument('--result_dir', type=str, default='result')
     p.add_argument('--log_dir', type=str, default='log')
@@ -103,7 +109,7 @@ def _load_pred(result_dir, threshold_override):
 
 
 def plot_gt_segment(x, y, pred, start, end, index, n_total, context_mult,
-                    threshold, out_path):
+                    threshold, out_path, gt_only=False):
     plt = _configure_pyplot()
 
     seg_len = max(end - start, 1)
@@ -113,16 +119,19 @@ def plot_gt_segment(x, y, pred, start, end, index, n_total, context_mult,
     xs = np.arange(left, right)
     x_win = x[left:right]
     y_win = y[left:right]
-    pred_win = pred[left:right]
     n_dims = x.shape[1]
 
-    tp_mask = y_win & pred_win
-    fp_mask = (~y_win) & pred_win
-    fn_mask = y_win & (~pred_win)
-
-    n_tp = int(tp_mask.sum())
-    n_fp = int(fp_mask.sum())
-    n_fn = int(fn_mask.sum())
+    if gt_only:
+        pred_win = None
+        n_tp = n_fp = n_fn = 0
+    else:
+        pred_win = pred[left:right]
+        tp_mask = y_win & pred_win
+        fp_mask = (~y_win) & pred_win
+        fn_mask = y_win & (~pred_win)
+        n_tp = int(tp_mask.sum())
+        n_fp = int(fp_mask.sum())
+        n_fn = int(fn_mask.sum())
 
     row_h = 0.5
     fig_h = max(5.0, 0.8 + row_h * n_dims)
@@ -139,13 +148,20 @@ def plot_gt_segment(x, y, pred, start, end, index, n_total, context_mult,
     red = '#d32f2f'
     fn_c = '#1565c0'  # blue: missed GT (not a model prediction)
 
-    fig.suptitle(
-        f'{n_total} GT anomalies  |  [{index}]  '
-        f'anomaly=[{start}, {end}) len={seg_len}  '
-        f'±{context_mult}×  thr={threshold} (no PA)  '
-        f'TP={n_tp} FP={n_fp} FN={n_fn}',
-        fontsize=9, y=0.995,
-    )
+    if gt_only:
+        title = (
+            f'{n_total} GT anomalies  |  [{index}]  '
+            f'anomaly=[{start}, {end}) len={seg_len}  '
+            f'±{context_mult}×'
+        )
+    else:
+        title = (
+            f'{n_total} GT anomalies  |  [{index}]  '
+            f'anomaly=[{start}, {end}) len={seg_len}  '
+            f'±{context_mult}×  thr={threshold} (no PA)  '
+            f'TP={n_tp} FP={n_fp} FN={n_fn}'
+        )
+    fig.suptitle(title, fontsize=9, y=0.995)
 
     for i in range(n_dims):
         ax = axes[i]
@@ -161,23 +177,23 @@ def plot_gt_segment(x, y, pred, start, end, index, n_total, context_mult,
         series = x_win[:, i].astype(float)
         ax.plot(xs, series, color=line_c, lw=1.0, zorder=2)
 
-        # TP/FP = model predictions (red); FN = miss (blue, not a prediction)
-        if n_tp:
-            ax.scatter(
-                xs[tp_mask], series[tp_mask],
-                s=10, c=red, marker='o', linewidths=0, zorder=5, label='TP',
-            )
-        if n_fp:
-            ax.scatter(
-                xs[fp_mask], series[fp_mask],
-                s=14, c=red, marker='^', linewidths=0, zorder=5, label='FP',
-            )
-        if n_fn:
-            ax.scatter(
-                xs[fn_mask], series[fn_mask],
-                s=12, facecolors='none', edgecolors=fn_c, marker='o',
-                linewidths=0.9, zorder=5, label='FN',
-            )
+        if not gt_only:
+            if n_tp:
+                ax.scatter(
+                    xs[tp_mask], series[tp_mask],
+                    s=10, c=red, marker='o', linewidths=0, zorder=5, label='TP',
+                )
+            if n_fp:
+                ax.scatter(
+                    xs[fp_mask], series[fp_mask],
+                    s=14, c=red, marker='^', linewidths=0, zorder=5, label='FP',
+                )
+            if n_fn:
+                ax.scatter(
+                    xs[fn_mask], series[fn_mask],
+                    s=12, facecolors='none', edgecolors=fn_c, marker='o',
+                    linewidths=0.9, zorder=5, label='FN',
+                )
 
         lo, hi = float(series.min()), float(series.max())
         if hi - lo < 1e-12:
@@ -195,20 +211,25 @@ def plot_gt_segment(x, y, pred, start, end, index, n_total, context_mult,
 
     from matplotlib.patches import Patch
     from matplotlib.lines import Line2D
-    axes[0].legend(
-        handles=[
-            Patch(facecolor=green, edgecolor='none',
-                  label=f'normal (±{context_mult}×)'),
-            Patch(facecolor=pink, edgecolor='none', label='GT anomaly'),
-            Line2D([0], [0], color=line_c, lw=1.2, label='metric'),
+    handles = [
+        Patch(facecolor=green, edgecolor='none',
+              label=f'normal (±{context_mult}×)'),
+        Patch(facecolor=pink, edgecolor='none', label='GT anomaly'),
+        Line2D([0], [0], color=line_c, lw=1.2, label='metric'),
+    ]
+    if not gt_only:
+        handles.extend([
             Line2D([0], [0], marker='o', color='w', markerfacecolor=red,
                    markersize=6, linestyle='None', label='TP (pred∩GT)'),
             Line2D([0], [0], marker='^', color='w', markerfacecolor=red,
                    markersize=7, linestyle='None', label='FP (pred∩¬GT)'),
             Line2D([0], [0], marker='o', color=fn_c, markerfacecolor='w',
                    markersize=6, linestyle='None', label='FN (GT∩¬pred)'),
-        ],
-        loc='upper right', fontsize=6.5, framealpha=0.92, ncol=3,
+        ])
+    axes[0].legend(
+        handles=handles,
+        loc='upper right', fontsize=6.5, framealpha=0.92,
+        ncol=3 if not gt_only else 1,
     )
 
     fig.tight_layout(rect=[0, 0, 1, 0.98])
@@ -219,53 +240,74 @@ def plot_gt_segment(x, y, pred, start, end, index, n_total, context_mult,
 
 def main():
     args = parse_args()
-    cfg = _PathConfig(args)
-    pft = args.posterior_flow_type
-    cfg.posterior_flow_type = None if pft.lower() in ('none', 'null') else pft
-    exp = resolve_output_dirs(cfg, run_name=args.run_name)
+    out_root = args.out_dir or ('viz_gt' if args.gt_only else 'viz_pred')
 
     (_, _), (x_test, y_test) = get_data(args.dataset, do_preprocess=True)
     if y_test is None:
         raise SystemExit(f'No test labels for dataset={args.dataset}')
 
-    score, pred, thr, thr_src, score_path = _load_pred(
-        cfg.result_dir, args.threshold,
-    )
+    x = np.asarray(x_test, dtype=float)
+    y = np.asarray(y_test).reshape(-1).astype(bool)
+    if len(y) != len(x):
+        raise SystemExit(
+            f'Length mismatch: x_test={len(x)} y_test={len(y)}'
+        )
 
-    # Align with score length (sliding window last-point scores)
-    x = np.asarray(x_test, dtype=float)[-len(score):]
-    y = np.asarray(y_test).reshape(-1).astype(bool)[-len(score):]
-    pred = np.asarray(pred, dtype=bool).reshape(-1)
-    assert len(x) == len(y) == len(pred) == len(score)
-
-    tp_all = int((y & pred).sum())
-    fp_all = int(((~y) & pred).sum())
-    fn_all = int((y & (~pred)).sum())
-    tn_all = int(((~y) & (~pred)).sum())
+    if args.gt_only:
+        pred = None
+        thr = None
+        thr_src = score_path = None
+        exp = 'gt'
+        out_dir = os.path.join(out_root, args.dataset)
+        prefix = 'gt'
+        header = f' GT ANOMALY ONLY  ({args.dataset})'
+    else:
+        cfg = _PathConfig(args)
+        pft = args.posterior_flow_type
+        cfg.posterior_flow_type = (
+            None if pft.lower() in ('none', 'null') else pft
+        )
+        exp = resolve_output_dirs(cfg, run_name=args.run_name)
+        score, pred, thr, thr_src, score_path = _load_pred(
+            cfg.result_dir, args.threshold,
+        )
+        # Align with score length (sliding window last-point scores)
+        x = x[-len(score):]
+        y = y[-len(score):]
+        pred = np.asarray(pred, dtype=bool).reshape(-1)
+        assert len(x) == len(y) == len(pred) == len(score)
+        out_dir = os.path.join(out_root, args.dataset, exp)
+        prefix = 'pred'
+        header = f' GT ANOMALY + MODEL PRED  ({args.dataset} / {exp})'
 
     segs = _segments(y)
     n_total = len(segs)
-    out_dir = os.path.join(args.out_dir, args.dataset, exp)
     os.makedirs(out_dir, exist_ok=True)
 
     print()
     print('=' * 64)
-    print(f' GT ANOMALY + MODEL PRED  ({args.dataset} / {exp})')
+    print(header)
     print('=' * 64)
-    print(f'  experiment           : {exp}')
-    print(f'  result_dir           : {cfg.result_dir}')
-    print(f'  test_score           : {score_path}')
-    print(f'  threshold            : {thr}  ({thr_src})')
-    print(f'  point adjustment     : False')
+    if not args.gt_only:
+        print(f'  experiment           : {exp}')
+        print(f'  result_dir           : {cfg.result_dir}')
+        print(f'  test_score           : {score_path}')
+        print(f'  threshold            : {thr}  ({thr_src})')
+        print(f'  point adjustment     : False')
     print(f'  GT anomaly segments  : {n_total}')
     print(f'  GT anomaly points    : {int(y.sum())} / {len(y)}')
     print(f'  context multiplier   : ±{args.context_mult}×')
-    print('-' * 64)
-    print(f'  TP points (no PA)    : {tp_all}')
-    print(f'  FP points (no PA)    : {fp_all}')
-    print(f'  FN points (no PA)    : {fn_all}')
-    print(f'  TN points (no PA)    : {tn_all}')
     print(f'  output dir           : {out_dir}')
+    if not args.gt_only:
+        tp_all = int((y & pred).sum())
+        fp_all = int(((~y) & pred).sum())
+        fn_all = int((y & (~pred)).sum())
+        tn_all = int(((~y) & (~pred)).sum())
+        print('-' * 64)
+        print(f'  TP points (no PA)    : {tp_all}')
+        print(f'  FP points (no PA)    : {fp_all}')
+        print(f'  FN points (no PA)    : {fn_all}')
+        print(f'  TN points (no PA)    : {tn_all}')
     print('-' * 64)
     show_n = min(50, n_total)
     for i, (a, b) in enumerate(segs[:show_n]):
@@ -276,10 +318,10 @@ def main():
     print(f'\nSaving {n_total} figures...')
 
     for i, (start, end) in enumerate(segs):
-        out_path = os.path.join(out_dir, f'pred_{i:04d}.png')
+        out_path = os.path.join(out_dir, f'{prefix}_{i:04d}.png')
         plot_gt_segment(
             x, y, pred, start, end, i, n_total, args.context_mult,
-            thr, out_path,
+            thr, out_path, gt_only=args.gt_only,
         )
         if (i + 1) % 10 == 0 or (i + 1) == n_total:
             print(f'  [{i + 1}/{n_total}] {out_path}')
